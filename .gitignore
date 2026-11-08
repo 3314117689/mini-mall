@@ -8,6 +8,7 @@ target/
 .classpath
 .project
 .settings/
+.factorypath
 
 # 日志（运行时产生）
 logs/

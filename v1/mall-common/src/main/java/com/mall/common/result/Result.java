@@ -2,6 +2,8 @@ package com.mall.common.result;
 
 import lombok.Data;
 
+import com.mall.common.exception.ErrorCode;
+
 /**
  * 统一返回体：所有接口的出参都用这个结构，
  * 前端/小程序只需要认一种格式，判断 code 是否为 0 即可。
@@ -37,5 +39,10 @@ public class Result<T> {
         r.setCode(code);
         r.setMsg(msg);
         return r;
+    }
+
+    /** 用错误码枚举构造失败返回，避免散落的魔法数字 */
+    public static <T> Result<T> fail(ErrorCode errorCode) {
+        return fail(errorCode.getCode(), errorCode.getMsg());
     }
 }

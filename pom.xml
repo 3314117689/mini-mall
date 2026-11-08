@@ -1,0 +1,61 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 https://maven.apache.org/xsd/maven-4.0.0.xsd">
+    <modelVersion>4.0.0</modelVersion>
+
+    <!-- 父工程统一管理 Spring Boot 版本：所有子模块不用再写版本号 -->
+    <parent>
+        <groupId>org.springframework.boot</groupId>
+        <artifactId>spring-boot-starter-parent</artifactId>
+        <version>4.1.2</version>
+        <relativePath/>
+    </parent>
+
+    <groupId>com.mall</groupId>
+    <artifactId>mini-mall</artifactId>
+    <version>1.0.0</version>
+    <packaging>pom</packaging>
+    <name>mini-mall</name>
+    <description>简易电商商城微服务（毕设学习项目）</description>
+
+    <!-- 子模块清单：以后每加一个服务，在这里登记 -->
+    <modules>
+        <module>mall-common</module>
+        <module>mall-user</module>
+    </modules>
+
+    <properties>
+        <java.version>17</java.version>
+        <mybatis-spring-boot.version>4.1.0</mybatis-spring-boot.version>
+    </properties>
+
+    <!-- dependencyManagement：只声明版本不真正引入依赖（版本仲裁），
+         子模块引用时无需写版本号，保证全工程版本一致 -->
+    <dependencyManagement>
+        <dependencies>
+            <dependency>
+                <groupId>com.mall</groupId>
+                <artifactId>mall-common</artifactId>
+                <version>${project.version}</version>
+            </dependency>
+            <dependency>
+                <groupId>org.mybatis.spring.boot</groupId>
+                <artifactId>mybatis-spring-boot-starter</artifactId>
+                <version>${mybatis-spring-boot.version}</version>
+            </dependency>
+        </dependencies>
+    </dependencyManagement>
+
+    <build>
+        <plugins>
+            <plugin>
+                <groupId>org.springframework.boot</groupId>
+                <artifactId>spring-boot-maven-plugin</artifactId>
+                <configuration>
+                    <!-- 父工程本身不是应用，跳过 repackage -->
+                    <skip>true</skip>
+                </configuration>
+            </plugin>
+        </plugins>
+    </build>
+</project>

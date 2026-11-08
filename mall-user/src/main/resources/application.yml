@@ -1,0 +1,25 @@
+# 服务端口：每个微服务占用独立端口（user=8081 product=8082 order=8083 gateway=9000）
+server:
+  port: 8081
+
+spring:
+  application:
+    # 服务名：注册到 Nacos 时用这个名字被别人发现（阶段3生效）
+    name: user-service
+  datasource:
+    driver-class-name: com.mysql.cj.jdbc.Driver
+    # serverTimezone 必须指定，否则 8.x/9.x 驱动连接时会有时区问题
+    url: jdbc:mysql://localhost:3306/db_user?useUnicode=true&characterEncoding=utf8&serverTimezone=Asia/Shanghai&useSSL=false&allowPublicKeyRetrieval=true
+    username: root
+    password: 123456
+  devtools:
+    restart:
+      # 热部署开关，生产环境打包时该依赖自动失效
+      enabled: true
+
+mybatis:
+  configuration:
+    # 驼峰映射：数据库 create_time 自动映射实体 createTime
+    map-underscore-to-camel-case: true
+    # 开发期把 SQL 打到控制台，方便看 MyBatis 到底执行了什么
+    log-impl: org.apache.ibatis.logging.stdout.StdOutImpl

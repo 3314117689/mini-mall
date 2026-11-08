@@ -1,0 +1,22 @@
+# 编译产物，可随时重新生成，不进仓库
+target/
+
+# IDE 相关
+*.iml
+.idea/
+.vscode/
+.classpath
+.project
+.settings/
+
+# 日志（运行时产生）
+logs/
+
+# Maven 包装器（Spring 生成，学习项目用不上）
+.mvn/
+mvnw
+mvnw.cmd
+
+# 系统文件
+.DS_Store
+Thumbs.db

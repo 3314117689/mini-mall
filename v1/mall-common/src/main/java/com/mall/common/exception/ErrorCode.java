@@ -13,6 +13,9 @@ public enum ErrorCode {
 
     /** 用户不存在 */
     USER_NOT_FOUND(1001, "用户不存在"),
+    
+    /** 商品不存在 */
+    PRODUCT_NOT_FOUND(1002, "商品不存在"),
 
     /** 未捕获的系统异常兜底 */
     SYSTEM_ERROR(5000, "系统繁忙，请稍后再试");

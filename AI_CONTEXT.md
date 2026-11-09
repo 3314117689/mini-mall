@@ -98,10 +98,10 @@
 **当前：L1 巩固中（L0 主体完成有遗留）**
 
 L0 遗留清单：
-1. mall-product 写操作验收（PowerShell 发 POST/PUT/DELETE；负向 PUT id=999 期望 code=1002）
-2. mall-user 补增删改——**用户自己动手写，AI 只做 review 不代写**
+1. ~~mall-product 写操作验收~~ ✅ 2026-11-09 验证通过，代码已提交（任务单#03）
+2. mall-user 补增删改——**用户自己动手写，AI 只做 review 不代写**（下一步）
 3. 商品服务接口文档 `v1/docs/api/02商品服务接口文档.md`（照 01 用户服务格式）
-4. git push：本地有未推送 commit；github.com 443 连不上，需代理（如 `git config --global http.proxy http://127.0.0.1:7890`）
+4. ~~git push~~ ✅ 2026-11-10 已推送至 origin/main；代理端口实为 **7891**，已配置仓库级 `git config http.proxy http://127.0.0.1:7891`（非全局）
 
 L1 巩固动作：按 3.2 白纸默写异常四件套 3 遍；自测 3 个追问。
 

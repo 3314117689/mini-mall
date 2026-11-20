@@ -3,16 +3,13 @@ package com.mall.order.service.impl;
 import java.math.BigDecimal;
 
 import org.springframework.beans.factory.annotation.Autowired;
-import org.springframework.beans.factory.annotation.Value;
-import org.springframework.core.ParameterizedTypeReference;
-import org.springframework.http.HttpMethod;
 import org.springframework.stereotype.Service;
-import org.springframework.web.client.RestClientException;
-import org.springframework.web.client.RestTemplate;
 
 import com.mall.common.exception.BizException;
 import com.mall.common.exception.ErrorCode;
 import com.mall.common.result.Result;
+import com.mall.order.client.ProductClient;
+import com.mall.order.client.UserClient;
 import com.mall.order.dto.OrderCreateDTO;
 import com.mall.order.dto.ProductDTO;
 import com.mall.order.dto.UserDTO;
@@ -30,14 +27,10 @@ public class OrderServiceImpl implements OrderService {
 	private OrderMapper orderMapper;
 
 	@Autowired
-	private RestTemplate restTemplate;
+	private UserClient userClient;
 
-	/** 从 application.yml 读取下游服务地址，避免把 URL 散落在代码里 */
-	@Value("${mall.user-service.base-url}")
-	private String userServiceBaseUrl;
-
-	@Value("${mall.product-service.base-url}")
-	private String productServiceBaseUrl;
+	@Autowired
+	private ProductClient productClient;
 
 	@Override
 	public Order getById(Long id) {
@@ -94,14 +87,10 @@ public class OrderServiceImpl implements OrderService {
 	private UserDTO getUser(Long userId) {
 		Result<UserDTO> result;
 		try {
-			result = restTemplate.exchange(
-					userServiceBaseUrl + "/user/" + userId,
-					HttpMethod.GET,
-					null,
-					new ParameterizedTypeReference<Result<UserDTO>>() {
-					}).getBody();
-		} catch (RestClientException e) {
-			// 连不上、超时等：下游不可用，给出可重试的提示
+			// 一行发起远程调用：服务名 -> 实例地址、拼 URL、反序列化都由框架完成
+			result = userClient.getById(userId);
+		} catch (Exception e) {
+			// 连不上、超时、无可用实例、响应解析失败：下游不可用，给出可重试的提示
 			log.error("调用用户服务失败, userId={}", userId, e);
 			throw new BizException(ErrorCode.REMOTE_CALL_FAILED);
 		}
@@ -116,13 +105,9 @@ public class OrderServiceImpl implements OrderService {
 	private ProductDTO getProduct(Long productId) {
 		Result<ProductDTO> result;
 		try {
-			result = restTemplate.exchange(
-					productServiceBaseUrl + "/product/" + productId,
-					HttpMethod.GET,
-					null,
-					new ParameterizedTypeReference<Result<ProductDTO>>() {
-					}).getBody();
-		} catch (RestClientException e) {
+			// 和 getUser 同一套：Feign 接口方法即远程调用
+			result = productClient.getById(productId);
+		} catch (Exception e) {
 			log.error("调用商品服务失败, productId={}", productId, e);
 			throw new BizException(ErrorCode.REMOTE_CALL_FAILED);
 		}

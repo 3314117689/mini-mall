@@ -17,6 +17,30 @@
 
 ## 一、开发记录
 
+### 2026-11-20（L3 完成：OpenFeign 替换 RestTemplate，按服务名下单）
+
+- **代码变更（只在 mall-order）**：
+  1. pom 加 `spring-cloud-starter-openfeign` + `spring-cloud-starter-loadbalancer`
+  2. 启动类 `OrderServiceApplication` 加 `@EnableFeignClients`（默认扫描 `com.mall.order` 子包）
+  3. 新增 `com.mall.order.client.UserClient` / `ProductClient`：`@FeignClient(name="user-service"/"product-service")`，方法注解照抄对方 Controller，返回 `Result<UserDTO>` / `Result<ProductDTO>`
+  4. `OrderServiceImpl`：删掉 RestTemplate 字段和两个 `@Value` base-url；`getUser`/`getProduct` 各自缩成一行 `userClient.getById(...)` / `productClient.getById(...)`，异常仍统一转 `REMOTE_CALL_FAILED(2001)`
+  5. 删除 `RestTemplateConfig`（已无引用；旧实现见 commit `24de3e8`）
+  6. yml：删掉 `mall.*.base-url`，新增 `spring.cloud.openfeign.client.config.default` 连接/读取超时各 3000ms
+- **调用链（口头面试口径）**：调用 `productClient.getById(1L)` → `@FeignClient` 里的 `product-service` 作为服务名 → LoadBalancer 向 Nacos 要实例列表（本地缓存）→ 轮询选一个实例 → 按 `@GetMapping` 拼出 `http://IP:8082/product/1` → 命中 `ProductController#getById`（24-27 行）→ JSON 按 `Result<ProductDTO>` 反序列化返回
+- **验收证据（本机实测）**：
+  1. 三服务注册成功，`healthyInstanceCount=1`
+  2. 正常下单：`POST /order/create {userId:1,productId:1,num:2}` → `code=0, orderId=4`；`GET /order/4` 金额 `19.80`（服务端算的 9.90×2）
+  3. 停掉 mall-product 再下单 → `{"code":2001,"msg":"服务调用失败，请稍后重试"}`
+  4. 全工程搜索：代码中无 `localhost:8082`、无 RestTemplate 引用
+- **踩坑**：
+  1. 只加 openfeign 不加 loadbalancer → 调用时找不到实例，必须显式加 `spring-cloud-starter-loadbalancer`
+  2. `@PathVariable("id")` 括号里的名字不能省，Feign 靠它替换路径占位符
+  3. Feign 默认超时是 10s/60s，比 L2 的 3s 宽松，已在 yml 覆盖
+  4. 停服务后 Nacos 实例列表有缓存延迟，期间调用是"连得上地址但连不上服务"，同样转 2001
+- **遗留**：`POST /order`（纯写库）仍暴露；库存只查不扣（L9-2 解决）
+- **下一步**：L4 Sentinel 熔断限流（`@SentinelResource` + fallback + QPS 规则）
+- **当前楼层**：**L3 完成**
+
 ### 2026-11-20（L3-1 验收通过：Nacos 3.3.0 + 三服务注册成功）
 
 - **环境**：Nacos Server **3.3.0**（1.4.7 已弃用——Nacos 官方规定 2.x 以上客户端连不上 1.x 服务端），解压到 `D:\bishe\environment\nacos`
@@ -179,7 +203,7 @@
 | L0 | SpringBoot / MyBatis | 三层架构分工、`@Data/@Mapper/@Service/@Autowired/@RestController`、`#{}` vs `${}`、自增主键回填、驼峰映射、Maven 多模块依赖 | user/product 各五件套 | 白纸默写五件套；CRUD 接口通过 | 已完成 |
 | L1 | 统一响应（基座） | Result / ErrorCode / BizException / GlobalExceptionHandler、非受检异常、异常匹配优先级、code 约定 | 四件套 + Service 中 throw | 不存在的 id 返回 code=1001/1002 | 已完成 |
 | L2 | Spring Cloud（前置） | RestTemplate Bean 与超时、DTO 与 Entity 的区别、Service 业务编排、远程调用失败转 BizException | `RestTemplateConfig`、`OrderCreateDTO/ProductDTO/UserDTO`、下单编排 | 服务端算金额；关掉商品服务返回友好失败 | 代码完成；泛型已口头讲通，手写延后至笔试专项（见三、台账） |
-| L3 | Spring Cloud | Nacos 注册与发现、`@EnableFeignClients`/`@FeignClient`、服务名替代 IP、客户端负载均衡 | 两个 Feign 接口，替换 RestTemplate | 代码无 `localhost:8082`，按服务名调用成功 | 未开始 |
+| L3 | Spring Cloud | Nacos 注册与发现、`@EnableFeignClients`/`@FeignClient`、服务名替代 IP、客户端负载均衡 | 两个 Feign 接口，替换 RestTemplate | 代码无 `localhost:8082`，按服务名调用成功 | 已完成 |
 | L4 | Spring Cloud | Sentinel 资源、`@SentinelResource`、fallback、QPS 流控、熔断与降级区别 | 商品查询资源 + fallback 方法 + 控制台规则 | 超阈值被拦截；停服务走降级文案 | 未开始 |
 | L5 | Redis / Spring Cache | `@Cacheable/@CacheEvict`、RedisCacheManager、TTL、缓存穿透与空值缓存、更新时删缓存 | 商品查询缓存 + 更新删缓存 | 第二次查询无 SQL 日志；空值也被缓存 | 未开始 |
 | L6 | JWT（RS256+JWKS）/ BCrypt / RBAC | RSA 密钥对、RS256 签名与验签、JWKS 公钥端点、BCrypt、拦截器统一验 token、ThreadLocal 上下文与清理、角色校验 | `JwtUtil`、`/auth/login`、`/auth/jwks`、`LoginInterceptor`、`UserContext` | 登录→下单链路通；篡改 token 被拒；无角色被拒 | 未开始 |

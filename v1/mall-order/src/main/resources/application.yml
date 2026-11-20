@@ -11,6 +11,13 @@ spring:
       discovery:
         # 注册中心地址：Nacos 服务端是 8848（3.x 的 8080 只是控制台，别填错）
         server-addr: 127.0.0.1:8848
+    # Feign 超时：与 L2 的 RestTemplate 保持一致（3 秒），下游卡住时快速失败
+    openfeign:
+      client:
+        config:
+          default:
+            connect-timeout: 3000
+            read-timeout: 3000
   datasource:
     driver-class-name: com.mysql.cj.jdbc.Driver
     url: jdbc:mysql://localhost:3306/db_order?useUnicode=true&characterEncoding=utf8&serverTimezone=Asia/Shanghai&useSSL=false&allowPublicKeyRetrieval=true
@@ -27,10 +34,3 @@ mybatis:
     map-underscore-to-camel-case: true
     # 开发期把 SQL 打到控制台，方便看 MyBatis 到底执行了什么
     log-impl: org.apache.ibatis.logging.stdout.StdOutImpl
-
-# 下游服务地址：L2 阶段先写死在本机；L3 接入 Nacos 后换成服务名
-mall:
-  user-service:
-    base-url: http://localhost:8081
-  product-service:
-    base-url: http://localhost:8082

@@ -33,6 +33,18 @@
             <version>${spring-cloud-alibaba.version}</version>
         </dependency>
 
+        <!-- OpenFeign：声明式 HTTP 调用（版本由 Spring Cloud BOM 管理） -->
+        <dependency>
+            <groupId>org.springframework.cloud</groupId>
+            <artifactId>spring-cloud-starter-openfeign</artifactId>
+        </dependency>
+
+        <!-- 客户端负载均衡：负责把服务名换成实例地址，按服务名调用时必需 -->
+        <dependency>
+            <groupId>org.springframework.cloud</groupId>
+            <artifactId>spring-cloud-starter-loadbalancer</artifactId>
+        </dependency>
+
         <!-- MyBatis：数据库访问（版本由父工程仲裁，此处不写） -->
         <dependency>
             <groupId>org.mybatis.spring.boot</groupId>

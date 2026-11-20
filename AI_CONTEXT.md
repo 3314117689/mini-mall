@@ -152,10 +152,26 @@
 - 为什么 HTTP 状态码还是 200？→ 全工程约定"前端只看 body 里的 code 是否为 0"，格式统一
 - 为什么 warn 和 error 日志级别不同？→ BizException 是预期内失败（一行 warn）；兜底是意外故障（error 带堆栈排查），且细节不暴露给外部
 
-### 3.3 后续楼层（待通关后沉淀）
+### 3.3 服务注册与声明式调用（L3）
 
-- L2 订单服务五件套 + RestTemplate 调用模板：通关后在此追加
-- L3 Nacos / L4 Gateway：通关后在此追加
+**默写顺序**：加依赖 → 配注册中心地址 → 启动类开关 → Feign 接口 → Service 注入调用
+
+1. **依赖**：`nacos-discovery`（SCA）+ `openfeign` + `loadbalancer` → 三者缺一不可，loadbalancer 是"把服务名换成实例地址"的执行者
+2. **yml**：`spring.cloud.nacos.discovery.server-addr` → 启动即注册，启动类不用加 `@EnableDiscoveryClient`
+3. **启动类**：`@EnableFeignClients` → 框架扫描 `@FeignClient` 接口并生成代理（接口没有实现类）
+4. **Feign 接口**：`@FeignClient(name="服务名")` + 方法上照抄对方 Controller 的 `@GetMapping("/x/{id}")` + 返回 `Result<DTO>` → `@PathVariable("id")` 名字不能省
+5. **Service**：`@Autowired` 注入接口，一行调用即远程请求；`try/catch` 转 `REMOTE_CALL_FAILED`、判 `code`/`data` 的活仍留在自己代码里
+
+**口决**：
+> 依赖三件套，yml 填 8848；启动开 Feign，接口写服务名；
+> 注解抄对方，超时别忘配；异常自己抓，返回自己判。
+
+**三个易错点**：只加 Feign 没加 LoadBalancer（找不到实例）/ `@PathVariable` 不写名字 / 以为 Feign 自动带熔断降级（要等 L4 Sentinel）
+
+### 3.4 后续楼层（待通关后沉淀）
+
+- L4 Sentinel 熔断限流模板：通关后在此追加
+- L5-L10：通关后逐层追加
 
 > 当前进度、遗留清单、下一步计划 → 一律看 `DEV_LOG.md`，本文档不记进度。
 

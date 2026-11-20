@@ -5,6 +5,7 @@
 > 1. 开发进度条目：AI 完成一段开发后即可追加，保证随时可接续
 > 2. 理解确认条目：只在用户明确说"理解了，记录吧"（或同等明确表态）后才写入，带 ✅ 确认标记
 > 3. 新条目追加在对应区块顶部（最新在前）
+> 4. 开发记录用**链路风格**（2026-11-20 用户定）：请求入口开始按代码顺序走，每步 `类:行号 代码 → 产出什么/跳到哪`，框架步骤只标"框架自动完成"；验收结果和坑压缩在条目末尾，不写大段说明
 
 ## 〇、讲解规则（2026-11-20 用户新增，AI 必须遵守）
 
@@ -17,67 +18,75 @@
 
 ## 一、开发记录
 
-### 2026-11-20（L4-3 完成：mall-order 降级，fallback/blockHandler 双分支实测）
+### 2026-11-20（L4-3 完成：mall-order 降级——commit `08e530c`）
 
-- **代码变更**：
-  1. mall-order 新增 `remote/RemoteService`：远程调用收口类，`getUser`/`getProduct` 搬进来成为 Sentinel 资源——`@SentinelResource(value="getUser", fallback="getUserFallback", blockHandler="getUserBlocked")`（getProduct 同构）
-  2. `OrderServiceImpl`：删掉私有 getUser/getProduct 与两个 Client 注入，改注入 RemoteService（业务逻辑不变，只是调用入口变了）
-  3. mall-common 的 `ErrorCode`：新增 `USER_SERVICE_UNAVAILABLE(2002)` / `PRODUCT_SERVICE_UNAVAILABLE(2003)`（按服务给降级文案）；**删除 `REMOTE_CALL_FAILED(2001)`**（改造后无引用，L2/L3 的统一 2001 被"按服务报不可用"取代）
-  4. Client（ProductClient/UserClient）未动
-- **异常分诊设计（fallback 里做的事）**：`getUser` 本体只发调用+判业务，异常全部上抛；fallback 方法多收一个 `Throwable t` 按类型分诊——`BizException` = 业务失败（如 1001 用户不存在）**原样放行**，防止降级文案掩盖业务错误；其余 = 服务真的调不通，翻译成 2002/2003。`BlockException`（规则触发）走 blockHandler 统一 4290
-- **验收证据（本机实测）**：
-  1. 正常下单：`POST /order/create {userId:1,productId:1,num:2}` → `code=0, orderId=5`
-  2. 停掉 mall-product 再下单 → `{"code":2003,"msg":"商品服务不可用，请稍后重试"}`（fallback 分支，L4 验收文案精确命中）
-  3. `userId=999` 下单（product 仍停）→ `{"code":1001,"msg":"用户不存在"}`——业务失败经 fallback 原样放行，未被降级掩盖
-  4. 给资源 `getUser` 推 QPS=1 规则后连发 2 单 → 第 1 单过规则、卡 2003；第 2 单 `{"code":4290,"msg":"请求过于频繁，请稍后再试"}`（blockHandler 分支）；测完已删规则恢复干净
-  5. order 客户端簇点：`/order/create`、`getUser`、`getProduct` 三个资源均可见
-- **踩坑**：
-  1. **PowerShell 传 JSON 的 `\"` 转义会被原样发出**，服务端解析失败抛 HttpMessageNotReadableException → 全局兜底返回 5000，看着像新代码 bug，实际是测试命令问题；POST body 一律写文件 `--data @file`
-  2. `@SentinelResource` 的 blockHandler 方法不写的话，BlockException 会直接上抛变 5000——注解里 fallback 和 blockHandler 要成对配置
-- **遗留**：无
-- **下一步**：L4 收尾（AI_CONTEXT 沉淀 L4 默写模板 + 路线图状态更新 + 大阶段提交推送）
-- **当前楼层**：L4-3 完成，**L4 全部完成**
+改动一句话：远程调用收进新文件 `RemoteService`，getUser/getProduct 变成 Sentinel 资源；`ErrorCode` 删 2001、加 2002/2003；`OrderServiceImpl` 只换调用入口，编排逻辑一行没动。
+
+**一、从 /order/create 开始，按代码顺序走（正常路径）**
+
+请求：`POST /order/create`，body `{"userId":1,"productId":1,"num":2}`
+
+1. `OrderController:40-42` `orderService.create(dto)` → 跳 `OrderServiceImpl:59`。
+2. `OrderServiceImpl:60-63` 三个字段非空校验，非法 → `BizException(PARAM_ERROR)`（`ErrorCode:15`，1000），合法通过。
+3. `OrderServiceImpl:67` `remoteService.getUser(1)` → 跳 `RemoteService:44`：
+   - `RemoteService:43` `@SentinelResource(value="getUser", fallback="getUserFallback", blockHandler="getUserBlocked")` → 框架自动把 `getUser` 登记为资源（调用从外面进来，检查才拦得到）。
+   - `RemoteService:45` `userClient.getById(1)` → Feign 发 HTTP 到 user-service，返回按 `Result<UserDTO>` 解析 → `{code:0, data:{id:1, username:...}}`。
+   - `RemoteService:46-49` code=0 且 data 非空 → 返回 `UserDTO{id:1}`。
+4. `OrderServiceImpl:68` `remoteService.getProduct(1)` → `RemoteService:73-79` 同构 → 返回 `ProductDTO{id:1, price:9.90}`。
+5. `OrderServiceImpl:70-76` 金额服务端算：`9.90 × 2 = 19.80` → `orderMapper.insert` → 自增主键回填到 `order.id`。
+6. `OrderServiceImpl:78-79` 返回 orderId → 前端收到 `{"code":0,"data":5}`。
+
+**二、同一链路，product 停机时走哪（降级路径）**
+
+第 1-3 步同上（getUser 正常）。到 `OrderServiceImpl:68` → `RemoteService:74` Feign 连接被拒抛异常 → 框架捕获，跳 `getProductFallback(1, t)`：
+
+- `RemoteService:83-84` `t` 不是 BizException（是连接异常）→ 不放行。
+- `RemoteService:87` → `BizException(PRODUCT_SERVICE_UNAVAILABLE)`（`ErrorCode:30`）→ 全局异常处理器 → `{"code":2003,"msg":"商品服务不可用，请稍后重试"}`。
+
+**三、业务失败不能被降级掩盖（fallback 里的分诊）**
+
+userId=999 下单：`RemoteService:45` HTTP 正常返回 `{code:1001}` → `RemoteService:75-76` 抛 `BizException(USER_NOT_FOUND)` → 框架照样跳 fallback → `RemoteService:83-84` `t` 是 BizException → **原样重抛** → 用户收到 `{"code":1001,"msg":"用户不存在"}`，不是 2003。
+
+**四、规则拦截走 blockHandler（拦截路径）**
+
+给资源 `getUser` 配 QPS=1 后的第 2 单：`RemoteService:43` 注解处框架直接判 BlockException → 跳 `getUserBlocked(1, e)`（`RemoteService:66-68`）→ 抛 `FLOW_LIMITED`（`ErrorCode:33`）→ `{"code":4290,"msg":"请求过于频繁，请稍后再试"}`。
+
+**验收四连（实测）**：正常单 `code=0, orderId=5`；停 product → 2003；userId=999 → 1001 原样放行；QPS=1 第 2 单 → 4290。测完规则已删，控制台干净。
+
+**坑**：① `@SentinelResource` 不配 blockHandler，BlockException 直接上抛变 5000——fallback/blockHandler 要成对写；② PowerShell 传 JSON 把 `\"` 原样发出 → 服务端 5000，像 bug 其实是测试命令问题，POST body 走文件。
+
 - **路线变更备注（2026-11-20 用户决定）**：AI_CONTEXT.md 原「明确砍掉的技术」章节已由用户删除——用户计划在后续纳入 MQ 等此前被砍的技术，具体排期待重新规划，后续窗口不要再按"这些技术已被砍掉"的旧口径回答
 
-### 2026-11-20（L4-2 完成：mall-product QPS 流控，第 11 个请求被拦）
+### 2026-11-20（L4-2 完成：mall-product QPS 流控——commit `00a2152`）
 
-- **代码变更**：
-  1. mall-common 的 `ErrorCode` 新增 `FLOW_LIMITED(4290, "请求过于频繁，请稍后再试")`（分段约定新增 4xxx = Sentinel 拦截类）
-  2. mall-product 新增 `config/SentinelBlockConfig`：注册 `BlockExceptionHandler` Bean（接口来自 sentinel-spring-webmvc-**v6x**-adapter，Boot 4/Spring 7 专用），被拦截的请求统一返回 HTTP 429 + `{"code":4290,"msg":"请求过于频繁，请稍后再试","data":null}`
-- **规则配置（控制台 API 推送，非代码硬编码）**：
-  - `POST http://127.0.0.1:8858/v2/flow/rule`（单条增）body：`{"app":"product-service","ip":"127.0.0.1","port":8720,"resource":"/product/{id}","limitApp":"default","grade":1,"count":10,"strategy":0,"controlBehavior":0}`（grade=1 即 QPS，阈值 10）
-  - 推送后客户端 `GET 127.0.0.1:8720/getRules?type=flow` 能回读到该规则
-- **资源名关键结论**：URL 资源名是 **URL 模板 `/product/{id}`**，不是具体路径 `/product/1`——v6x 适配器自动按 Spring MVC 的模板登记资源（从客户端 `/clusterNode` 接口实测确认）
-- **验收证据（本机实测）**：
-  1. 单进程 1 秒内连发 15 次 `GET /product/1`：**pass=10, block=5**，第 11 个起全部返回 HTTP 429 + code=4290
-  2. 之前用 PowerShell 循环逐个 curl 时得 13/2——15 次跨了两个秒级窗口，验证口径必须"单进程一秒内连发"
-- **踩坑**：
-  1. Boot 4 默认换用 Jackson 3，容器里没有 `com.fasterxml.jackson.databind.ObjectMapper` Bean——拦截处理器注入 ObjectMapper 启动失败；改为按 ErrorCode 手工拼固定 JSON（code/msg 仍以 ErrorCode 为唯一来源）
-  2. 控制台规则 API：列表查询 `GET /v2/flow/rules?app=...`，**单条新增是 `POST /v2/flow/rule`**（复数路径 POST 会 405）
-  3. PowerShell 向 curl 传 JSON 参数会吞内嵌双引号导致 400，body 先写文件再 `--data @file`
-  4. mall-product 旧 jar 被运行中的服务进程锁定，repackage 前必须先停服务
-- **遗留**：无
-- **下一步**：L4-3 mall-order 降级（getUser/getProduct 搬进独立 RemoteService + `@SentinelResource` + fallback，停 product 验证降级文案）
-- **当前楼层**：L4-2 完成
+改动一句话：`ErrorCode` 加 `FLOW_LIMITED(4290)`；mall-product 新增 `SentinelBlockConfig`（本子步唯一新代码）。规则走控制台推送，不硬编码。
 
-### 2026-11-20（L4-1 完成：三服务接入 Sentinel，控制台冒烟通过）
+**拦截链路（1 秒 15 连发视角）**
 
-- **代码变更（三个业务服务同步改，mall-common 不动）**：
-  1. mall-user / mall-product / mall-order 的 pom 各加 `spring-cloud-starter-alibaba-sentinel`（版本 `${spring-cloud-alibaba.version}` = 2025.1.0.0，内置 Sentinel 客户端 1.8.9）
-  2. 三个 application.yml 的 `spring.cloud` 下新增 `sentinel.transport`：`dashboard: 127.0.0.1:8858`、`port: 8719`
-- **环境**：sentinel-dashboard **1.8.9** 已下载到 `D:\bishe\environment\sentinel\sentinel-dashboard-1.8.9.jar`（22.7MB，GitHub release tag **不带 v 前缀**：`releases/download/1.8.9/...`）
-- **启动方式**：`java "-Dserver.port=8858" -jar sentinel-dashboard-1.8.9.jar`（PowerShell 下 `-D` 参数必须加引号，否则被拆成两个参数报 ClassNotFoundException；8858 是为避开 Nacos 控制台的 8080）
-- **端口分布（实测）**：控制台 8858；dashboard 自身占 8719；product=8720、user=8721、order=8722（客户端从 8719 起自动顺延）
-- **验收证据（本机实测）**：
-  1. `mvn install -q -DskipTests` 四模块编译通过
-  2. 三服务启动正常，8081/8082/8083 监听，GET /product/1、/user/1、/order/1 均正常返回
-  3. 客户端通信端口实测响应：`GET 127.0.0.1:8720/getRules?type=flow` 返回 `[]`，`/version` 返回 `1.8.9`
-  4. 控制台 API `GET 127.0.0.1:8858/app/names.json`（登录 sentinel/sentinel 后）返回 `["product-service","user-service","order-service"]`——三个应用心跳全部到达
-- **兼容性结论**：Boot 4.1.2 + SCA 2025.1.0.0 下 Sentinel 1.8.9 客户端**运行期可用**（应用注册 + 命令端口双验证），开工前评估的中等风险解除；控制台是独立 jar 与 Boot 版本无关
-- **踩坑**：dashboard 默认端口 8080 与 Nacos 控制台冲突，必须换端口启动；release 下载地址 tag 无 v 前缀，写 v1.8.9 会 404
-- **遗留**：无
-- **下一步**：L4-2 mall-product QPS 流控（控制台配 QPS=10，第 11 次被拦返回友好提示）
-- **当前楼层**：L4-1 完成
+请求：`GET /product/1`
+
+1. 启动日志 `[Sentinel Starter] register SentinelWebInterceptor with urlPatterns: [/**]` → 框架自动把每个接口登记为 URL 资源，资源名是 **MVC 模板 `/product/{id}`**，不是 `/product/1`（客户端 `/clusterNode` 实测确认）——配规则必须写模板。
+2. 控制台 `POST 8858/v2/flow/rule`：`grade=1`(QPS)、`count=10` → 推到 product 客户端内存（`8720/getRules?type=flow` 可回读；改阈值不重启服务）。
+3. 第 1~10 个请求：框架查规则未超 → 放行 → `ProductController:25-26` → 正常 `Result` 返回。
+4. 第 11 个：规则命中 BlockException → 框架调我注册的 `blockExceptionHandler` Bean → `SentinelBlockConfig:33-34` 设 HTTP 429 + JSON 头 → `:37-40` 按 `ErrorCode:33` 拼出 `{"code":4290,"msg":"请求过于频繁，请稍后再试","data":null}` 写回响应。
+5. 实测：单进程一秒内 15 连发 = **pass=10, block=5**。逐个 curl 是 13/2——跨了两个秒级窗口，验证口径必须"单进程一秒内连发"。
+
+**坑**：① Boot 4 用 Jackson 3，容器没有 `com.fasterxml...ObjectMapper` Bean，注入启动失败 → 手工拼 JSON，code/msg 仍以 ErrorCode 为唯一来源；② 控制台规则 API 单条新增是 `POST /v2/flow/rule`（复数路径 POST 405）；③ PowerShell 传 JSON 吞双引号，body 写文件 `--data @file`；④ 旧 jar 被运行中服务锁定，repackage 前先停服务。
+
+### 2026-11-20（L4-1 完成：三服务接入 Sentinel，控制台冒烟通过——commit `7095c34`）
+
+改动一句话：三个 pom 各加 `spring-cloud-starter-alibaba-sentinel`（SCA 2025.1.0.0 → 内置客户端 1.8.9）；三个 yml 加 `sentinel.transport`。**无 Java 代码改动。**
+
+**接线链路（启动视角）**
+
+1. `pom.xml` 加 starter → 引入 Sentinel 1.8.9 客户端。
+2. `application.yml` `spring.cloud.sentinel.transport`：dashboard=`127.0.0.1:8858`（避开 Nacos 控制台 8080）+ 通信端口 8719（同机三服务自动顺延：product=8720、user=8721、order=8722）。
+3. 启动日志出现 `register SentinelWebInterceptor with urlPatterns: [/**]` → 每个接口自动成为 URL 资源（"来路 A"，零代码）。
+4. 客户端定时向控制台发心跳 → `GET 8858/app/names.json` 返回 `["product-service","user-service","order-service"]` → 接线完成，Boot 4.1.2 兼容风险解除。
+
+环境：dashboard 1.8.9 在 `D:\bishe\environment\sentinel\`，启动命令 `java "-Dserver.port=8858" -jar sentinel-dashboard-1.8.9.jar`。
+
+**坑**：① PowerShell 下 `-D` 参数必须加引号，否则拆参数报 ClassNotFoundException；② GitHub release tag 无 v 前缀，写 `v1.8.9` 下载 404。
 
 ### 2026-11-20（L3 完成：OpenFeign 替换 RestTemplate，按服务名下单）
 

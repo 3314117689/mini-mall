@@ -17,6 +17,27 @@
 
 ## 一、开发记录
 
+### 2026-11-20（L4-3 完成：mall-order 降级，fallback/blockHandler 双分支实测）
+
+- **代码变更**：
+  1. mall-order 新增 `remote/RemoteService`：远程调用收口类，`getUser`/`getProduct` 搬进来成为 Sentinel 资源——`@SentinelResource(value="getUser", fallback="getUserFallback", blockHandler="getUserBlocked")`（getProduct 同构）
+  2. `OrderServiceImpl`：删掉私有 getUser/getProduct 与两个 Client 注入，改注入 RemoteService（业务逻辑不变，只是调用入口变了）
+  3. mall-common 的 `ErrorCode`：新增 `USER_SERVICE_UNAVAILABLE(2002)` / `PRODUCT_SERVICE_UNAVAILABLE(2003)`（按服务给降级文案）；**删除 `REMOTE_CALL_FAILED(2001)`**（改造后无引用，L2/L3 的统一 2001 被"按服务报不可用"取代）
+  4. Client（ProductClient/UserClient）未动
+- **异常分诊设计（fallback 里做的事）**：`getUser` 本体只发调用+判业务，异常全部上抛；fallback 方法多收一个 `Throwable t` 按类型分诊——`BizException` = 业务失败（如 1001 用户不存在）**原样放行**，防止降级文案掩盖业务错误；其余 = 服务真的调不通，翻译成 2002/2003。`BlockException`（规则触发）走 blockHandler 统一 4290
+- **验收证据（本机实测）**：
+  1. 正常下单：`POST /order/create {userId:1,productId:1,num:2}` → `code=0, orderId=5`
+  2. 停掉 mall-product 再下单 → `{"code":2003,"msg":"商品服务不可用，请稍后重试"}`（fallback 分支，L4 验收文案精确命中）
+  3. `userId=999` 下单（product 仍停）→ `{"code":1001,"msg":"用户不存在"}`——业务失败经 fallback 原样放行，未被降级掩盖
+  4. 给资源 `getUser` 推 QPS=1 规则后连发 2 单 → 第 1 单过规则、卡 2003；第 2 单 `{"code":4290,"msg":"请求过于频繁，请稍后再试"}`（blockHandler 分支）；测完已删规则恢复干净
+  5. order 客户端簇点：`/order/create`、`getUser`、`getProduct` 三个资源均可见
+- **踩坑**：
+  1. **PowerShell 传 JSON 的 `\"` 转义会被原样发出**，服务端解析失败抛 HttpMessageNotReadableException → 全局兜底返回 5000，看着像新代码 bug，实际是测试命令问题；POST body 一律写文件 `--data @file`
+  2. `@SentinelResource` 的 blockHandler 方法不写的话，BlockException 会直接上抛变 5000——注解里 fallback 和 blockHandler 要成对配置
+- **遗留**：无
+- **下一步**：L4 收尾（AI_CONTEXT 沉淀 L4 默写模板 + 路线图状态更新 + 大阶段提交推送）
+- **当前楼层**：L4-3 完成，**L4 全部完成**
+
 ### 2026-11-20（L4-2 完成：mall-product QPS 流控，第 11 个请求被拦）
 
 - **代码变更**：

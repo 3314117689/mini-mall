@@ -23,8 +23,11 @@ public enum ErrorCode {
     /** 订单不存在 */
     ORDER_NOT_FOUND(1003, "订单不存在"),
 
-    /** 远程服务调用失败（连接不上、超时等） */
-    REMOTE_CALL_FAILED(2001, "服务调用失败，请稍后重试"),
+    /** 用户服务不可用（Sentinel 降级：调用不通时由 fallback 抛出，L4） */
+    USER_SERVICE_UNAVAILABLE(2002, "用户服务不可用，请稍后重试"),
+
+    /** 商品服务不可用（Sentinel 降级：调用不通时由 fallback 抛出，L4） */
+    PRODUCT_SERVICE_UNAVAILABLE(2003, "商品服务不可用，请稍后重试"),
 
     /** Sentinel 限流/熔断拦截（L4）：触发规则的请求由拦截处理器统一返回此文案 */
     FLOW_LIMITED(4290, "请求过于频繁，请稍后再试"),

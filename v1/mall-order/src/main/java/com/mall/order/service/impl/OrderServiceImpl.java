@@ -7,14 +7,12 @@ import org.springframework.stereotype.Service;
 
 import com.mall.common.exception.BizException;
 import com.mall.common.exception.ErrorCode;
-import com.mall.common.result.Result;
-import com.mall.order.client.ProductClient;
-import com.mall.order.client.UserClient;
 import com.mall.order.dto.OrderCreateDTO;
 import com.mall.order.dto.ProductDTO;
 import com.mall.order.dto.UserDTO;
 import com.mall.order.entity.Order;
 import com.mall.order.mapper.OrderMapper;
+import com.mall.order.remote.RemoteService;
 import com.mall.order.service.OrderService;
 
 import lombok.extern.slf4j.Slf4j;
@@ -26,11 +24,9 @@ public class OrderServiceImpl implements OrderService {
 	@Autowired
 	private OrderMapper orderMapper;
 
+	/** 远程调用收口：每个调用是 Sentinel 资源，降级/拦截翻译都在里面（L4） */
 	@Autowired
-	private UserClient userClient;
-
-	@Autowired
-	private ProductClient productClient;
+	private RemoteService remoteService;
 
 	@Override
 	public Order getById(Long id) {
@@ -68,8 +64,8 @@ public class OrderServiceImpl implements OrderService {
 		log.info("下单, userId={}, productId={}, num={}",
 				dto.getUserId(), dto.getProductId(), dto.getNum());
 
-		UserDTO user = getUser(dto.getUserId());
-		ProductDTO product = getProduct(dto.getProductId());
+		UserDTO user = remoteService.getUser(dto.getUserId());
+		ProductDTO product = remoteService.getProduct(dto.getProductId());
 
 		Order order = new Order();
 		order.setUserId(user.getId());
@@ -81,41 +77,6 @@ public class OrderServiceImpl implements OrderService {
 
 		log.info("下单成功, orderId={}, amount={}", order.getId(), order.getAmount());
 		return order.getId();
-	}
-
-	/** 调用用户服务：HTTP 失败和业务失败分开处理 */
-	private UserDTO getUser(Long userId) {
-		Result<UserDTO> result;
-		try {
-			// 一行发起远程调用：服务名 -> 实例地址、拼 URL、反序列化都由框架完成
-			result = userClient.getById(userId);
-		} catch (Exception e) {
-			// 连不上、超时、无可用实例、响应解析失败：下游不可用，给出可重试的提示
-			log.error("调用用户服务失败, userId={}", userId, e);
-			throw new BizException(ErrorCode.REMOTE_CALL_FAILED);
-		}
-		if (result == null || result.getCode() != 0 || result.getData() == null) {
-			log.warn("用户不存在, userId={}, result={}", userId, result);
-			throw new BizException(ErrorCode.USER_NOT_FOUND);
-		}
-		return result.getData();
-	}
-
-	/** 调用商品服务：拿商品 id、价格 */
-	private ProductDTO getProduct(Long productId) {
-		Result<ProductDTO> result;
-		try {
-			// 和 getUser 同一套：Feign 接口方法即远程调用
-			result = productClient.getById(productId);
-		} catch (Exception e) {
-			log.error("调用商品服务失败, productId={}", productId, e);
-			throw new BizException(ErrorCode.REMOTE_CALL_FAILED);
-		}
-		if (result == null || result.getCode() != 0 || result.getData() == null) {
-			log.warn("商品不存在, productId={}, result={}", productId, result);
-			throw new BizException(ErrorCode.PRODUCT_NOT_FOUND);
-		}
-		return result.getData();
 	}
 
 	@Override

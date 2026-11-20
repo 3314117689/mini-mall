@@ -17,6 +17,21 @@
 
 ## 一、开发记录
 
+### 2026-11-20（L3-1 Nacos 注册中心接入，待启动验证）
+
+- **完成**：
+  1. 父 POM 新增 `spring-cloud.version=2025.1.4`、`spring-cloud-alibaba.version=2025.1.0.0`；dependencyManagement **只导 Cloud BOM**，不导 SCA BOM（防它把 Cloud 顶回 2025.1.0）
+  2. mall-user / mall-product / mall-order 各加 `spring-cloud-starter-alibaba-nacos-discovery`（版本由父工程属性提供）
+  3. 三个 application.yml 加 `spring.cloud.nacos.discovery.server-addr: 127.0.0.1:8848`
+  4. 三个启动类**未改动**——注册由框架自动完成，不需要 `@EnableDiscoveryClient`
+- **验证**：
+  1. `mvn install -q -DskipTests` 四模块编译通过
+  2. `dependency:tree` 核对：SCA 为 2025.1.0.0，`spring-cloud-commons` 实际解析为 **5.0.4**（未被 SCA 顶回 5.0.0），BOM 顺序风险已排除
+  3. **未做**：Nacos Server 未启动，实例注册未实测
+- **遗留/风险**：SCA 2025.1.0.0 只官方适配 Boot 4.0.x，Boot 4.1.2 的运行期兼容性仍待实测；失败则转路线 B（Boot 3.5.x + Cloud 2025.0.x + SCA 2025.0.0.0）
+- **下一步**：启动 Nacos Server 3.3.0（`startup.cmd -m standalone`）→ 控制台 `http://127.0.0.1:8080` 初始化管理员密码 → 依次启动三个服务 → 看服务列表 3 个实例健康
+- **当前楼层**：L3-1 代码完成，待运行验证
+
 ### 2026-11-20（L3 开工前：版本结论 + 讲解规则）
 
 - **版本结论（用户选择路线 A：保持 Boot 4.1.2）**：

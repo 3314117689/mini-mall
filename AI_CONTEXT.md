@@ -20,6 +20,7 @@
    - 提交前必须 `mvn install -q -DskipTests` 编译通过；提交信息按 `feat: 阶段X xxx` / `docs: xxx` 格式，中文。
    - **留痕粒度（2026-11-18 用户确认）**：每个可验收单元一个 commit（如新增 DTO、接入编排、容错处理各一次），DEV_LOG 按楼层汇总；留痕载体只认 **Git diff + DEV_LOG**，不额外维护 CHANGELOG 或每次会话的变更文件。
    - 阶段内的楼层可增量提交，但阶段收尾这一次提交不可省略；提交后确认 `git status -sb` 干净且与 origin/main 一致。
+7. **大阶段完成自动提交（2026-11-20 用户明确要求）**：每完成一个大阶段（如 L2→L3 这类楼层组收尾），AI **自动执行** Git 提交并推送到 GitHub，**不需要用户提醒**；提交前同样先 `mvn install` 编译通过、先更新 DEV_LOG，规则同铁律 6。
 
 ## 一、项目一句话定位
 
@@ -39,9 +40,11 @@
 
 ### 版本映射（开发前统一对齐）
 
-> Spring Boot / Spring Cloud / Spring Cloud Alibaba 版本必须严格兼容，参考阿里云官方版本说明：
-> - Spring Boot 4.x → Spring Cloud 2024.x → Spring Cloud Alibaba 2023.x（具体版本开发时查表，父 POM 用 BOM 统一管理版本）
-> - 风险：当前父 POM 为 Boot 4.1.2，Alibaba / Sentinel / ShardingSphere 生态对 4.x 的适配必须在 L3 开工前查表确认；不适配就把全工程降到 Boot 3.5.x（业务代码基本不用改）
+> 2026-11-20 已查表确认（以官方发布说明为准，升级时重新查）：
+> - Boot **4.1.2** → Spring Cloud **2025.1.4**（Spring 官方发布说明明确支持 4.1.2） → Spring Cloud Alibaba **2025.1.0.0**（官方只写适配 Boot 4.0.x，4.1.2 未官方验证，属已知风险）
+> - Nacos Server **3.x**（当前 3.3.0）：服务端端口 8848；3.x 控制台端口 8080
+> - 父 POM 只导 Cloud BOM；SCA 只给 starter 写显式版本，**不要整包导 SCA BOM**（其 BOM 钉 Cloud 2025.1.0，会把 2025.1.4 顶回去）
+> - 兜底方案：SCA 在 4.1.2 上跑不通，全工程降到 Boot 3.5.x + Cloud 2025.0.x + SCA 2025.0.0.0（业务代码基本不用改）
 
 ### 分层路线图
 

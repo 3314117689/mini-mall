@@ -6,6 +6,11 @@ spring:
   application:
     # 服务名：注册到 Nacos 时用这个名字被别人发现（阶段3生效）
     name: order-service
+  cloud:
+    nacos:
+      discovery:
+        # 注册中心地址：Nacos 服务端是 8848（3.x 的 8080 只是控制台，别填错）
+        server-addr: 127.0.0.1:8848
   datasource:
     driver-class-name: com.mysql.cj.jdbc.Driver
     url: jdbc:mysql://localhost:3306/db_order?useUnicode=true&characterEncoding=utf8&serverTimezone=Asia/Shanghai&useSSL=false&allowPublicKeyRetrieval=true

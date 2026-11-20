@@ -37,6 +37,7 @@
 - **遗留**：无
 - **下一步**：L4 收尾（AI_CONTEXT 沉淀 L4 默写模板 + 路线图状态更新 + 大阶段提交推送）
 - **当前楼层**：L4-3 完成，**L4 全部完成**
+- **路线变更备注（2026-11-20 用户决定）**：AI_CONTEXT.md 原「明确砍掉的技术」章节已由用户删除——用户计划在后续纳入 MQ 等此前被砍的技术，具体排期待重新规划，后续窗口不要再按"这些技术已被砍掉"的旧口径回答
 
 ### 2026-11-20（L4-2 完成：mall-product QPS 流控，第 11 个请求被拦）
 
@@ -265,7 +266,7 @@
 | L1 | 统一响应（基座） | Result / ErrorCode / BizException / GlobalExceptionHandler、非受检异常、异常匹配优先级、code 约定 | 四件套 + Service 中 throw | 不存在的 id 返回 code=1001/1002 | 已完成 |
 | L2 | Spring Cloud（前置） | RestTemplate Bean 与超时、DTO 与 Entity 的区别、Service 业务编排、远程调用失败转 BizException | `RestTemplateConfig`、`OrderCreateDTO/ProductDTO/UserDTO`、下单编排 | 服务端算金额；关掉商品服务返回友好失败 | 代码完成；泛型已口头讲通，手写延后至笔试专项（见三、台账） |
 | L3 | Spring Cloud | Nacos 注册与发现、`@EnableFeignClients`/`@FeignClient`、服务名替代 IP、客户端负载均衡 | 两个 Feign 接口，替换 RestTemplate | 代码无 `localhost:8082`，按服务名调用成功 | 已完成 |
-| L4 | Spring Cloud | Sentinel 资源、`@SentinelResource`、fallback、QPS 流控、熔断与降级区别 | 商品查询资源 + fallback 方法 + 控制台规则 | 超阈值被拦截；停服务走降级文案 | 未开始 |
+| L4 | Spring Cloud | Sentinel 资源、`@SentinelResource`、fallback、QPS 流控、熔断与降级区别 | 商品查询资源 + fallback 方法 + 控制台规则 | 超阈值被拦截；停服务走降级文案 | 已完成 |
 | L5 | Redis / Spring Cache | `@Cacheable/@CacheEvict`、RedisCacheManager、TTL、缓存穿透与空值缓存、更新时删缓存 | 商品查询缓存 + 更新删缓存 | 第二次查询无 SQL 日志；空值也被缓存 | 未开始 |
 | L6 | JWT（RS256+JWKS）/ BCrypt / RBAC | RSA 密钥对、RS256 签名与验签、JWKS 公钥端点、BCrypt、拦截器统一验 token、ThreadLocal 上下文与清理、角色校验 | `JwtUtil`、`/auth/login`、`/auth/jwks`、`LoginInterceptor`、`UserContext` | 登录→下单链路通；篡改 token 被拒；无角色被拒 | 未开始 |
 | L7 | Spring Cloud Gateway | 路由断言与过滤器、全局过滤器、统一鉴权、WebFlux 与 WebMVC 差异 | `mall-gateway` 路由 + `JwtAuthGlobalFilter` | 只打 9000 可访问三服务；无 token 被网关拦截 | 未开始 |

@@ -78,15 +78,6 @@
 - ★ **Spring Cloud Alibaba 全家桶线**（L3+L4）：Nacos + Feign + Sentinel——简历上"熟悉 Spring Cloud Alibaba"的硬指标
 - ★ **面试标准线**（L3+L7）：注册中心 + 网关——面试官不会问"这和单体有什么区别"
 
-### 明确砍掉的技术（保持代码量可控，面试价值不足或太重）
-
-- ❌ MQ / 分布式事务：太重，需要生产者/消费者/事务消息配套，代码量暴增，消化不过来
-- ❌ Docker 部署：环境搭建不是后端核心考点，跳过
-- ❌ Nacos 配置中心：和注册中心二选一，注册中心面试高频更高
-- ❌ 分布式锁 / 库存扣减超卖：需要 Redis/Lua 或数据库乐观锁，引入后复杂度陡增
-- ❌ RabbitMQ / Kafka：同 MQ，重（M2 仅保留 RabbitMQ 一个最小异步场景，Kafka 口头讲）
-- ❌ Spring AI + MCP / RAG：本工程不落地（版本兼容风险高、代码量重），面试用过往经历口述
-
 ### 踩坑速查（按楼层归类，新增坑到此追加）
 
 - L0：包少建一层导致 Mapper 扫描不到（必须 `com.mall.<服务名>.mapper`）；判空逻辑写反；表结构与代码不一致（SQL 永远写数据库真实列名）；金额用 BigDecimal；改多模块文件时曾改串 yml
@@ -169,10 +160,30 @@
 
 **三个易错点**：只加 Feign 没加 LoadBalancer（找不到实例）/ `@PathVariable` 不写名字 / 以为 Feign 自动带熔断降级（要等 L4 Sentinel）
 
-### 3.4 后续楼层（待通关后沉淀）
+### 3.4 Sentinel 熔断限流（L4）
 
-- L4 Sentinel 熔断限流模板：通关后在此追加
-- L5-L10：通关后逐层追加
+**默写顺序（依赖顺序）**：三服务加依赖 → yml 配控制台 → 独立收口类 + `@SentinelResource` → fallback/blockHandler 方法 → 控制台配规则
+
+1. **依赖**：`spring-cloud-starter-alibaba-sentinel`（版本跟 SCA，2025.1.0.0 内置客户端 1.8.9）→ 加了它，每个 Controller 接口自动成为 URL 资源
+2. **yml**：`spring.cloud.sentinel.transport.dashboard: 127.0.0.1:8858` + `port: 8719`（三服务同机自动顺延 8720/8721）
+3. **收口类**：远程调用集中到一个 `@Component`（RemoteService）——注解必须"从外面调进来"才生效，同类内部直接调用无效；方法上 `@SentinelResource(value="getProduct", fallback="getProductFallback", blockHandler="getProductBlocked")`
+4. **资源方法本体**：只发调用 + 判业务，异常一律上抛（业务失败抛 BizException，调不通抛原始异常）
+5. **fallback**：签名 = 原参数 + `Throwable t` → 按 t 类型分诊：BizException 原样放行（业务失败不能被降级文案掩盖），其余翻译成"XX服务不可用"(2002/2003)
+6. **blockHandler**：签名 = 原参数 + `BlockException e` → 规则触发（限流/熔断）走这里，统一 4290；不写它 BlockException 直接上抛变 5000
+7. **控制台规则**：dashboard 独立 jar 自己启动（8858 避开 Nacos 控制台 8080）；对资源配 QPS 阈值，URL 资源名是**模板** `/product/{id}` 不是具体路径；推送到客户端内存，改阈值不重启
+
+**口诀**：
+> 依赖一加资源来，yml 指路 8719；
+> 调用收口独立类，注解起名才管用；
+> fallback 接异常分诊，blockHandler 接规则拦截；
+> 业务失败原样放，链路断了才降级。
+
+**自测三问**：资源是什么？为什么收口类里的注解才生效？（统一入口检查，内部调用绕过）/ fallback 和 blockHandler 区别？（接异常 vs 接 BlockException）/ 熔断和降级区别？（自动断电有半开恢复 vs 备胎方案无状态）
+
+### 3.5 后续楼层（待通关后沉淀）
+
+- L5 Redis 缓存模板：通关后在此追加
+- L6-L10：通关后逐层追加
 
 > 当前进度、遗留清单、下一步计划 → 一律看 `DEV_LOG.md`，本文档不记进度。
 

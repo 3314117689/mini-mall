@@ -1,7 +1,11 @@
 package com.mall.user.mapper;
 
+import org.apache.ibatis.annotations.Delete;
+import org.apache.ibatis.annotations.Insert;
 import org.apache.ibatis.annotations.Mapper;
+import org.apache.ibatis.annotations.Options;
 import org.apache.ibatis.annotations.Select;
+import org.apache.ibatis.annotations.Update;
 
 import com.mall.user.entity.User;
 
@@ -13,4 +17,19 @@ public interface UserMapper {
 
     @Select("select id, username, password, phone, create_time from user where id = #{id}")
     User selectById(Long id);
+
+    /**
+     * 新增用户。useGeneratedKeys = true 表示插入成功后
+     * 把数据库自增生成的主键回填到 user.id 字段上。
+     * create_time 不写：由数据库默认值自动生成。
+     */
+    @Insert("insert into user(username, password, phone) values(#{username}, #{password}, #{phone})")
+    @Options(useGeneratedKeys = true, keyProperty = "id")
+    int insert(User user);
+
+    @Update("update user set username = #{username}, password = #{password}, phone = #{phone} where id = #{id}")
+    int update(User user);
+
+    @Delete("delete from user where id = #{id}")
+    int deleteById(Long id);
 }

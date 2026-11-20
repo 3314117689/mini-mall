@@ -11,11 +11,20 @@ package com.mall.common.exception;
  */
 public enum ErrorCode {
 
+    /** 参数错误：必填项缺失或取值非法 */
+    PARAM_ERROR(1000, "参数错误"),
+
     /** 用户不存在 */
     USER_NOT_FOUND(1001, "用户不存在"),
     
     /** 商品不存在 */
     PRODUCT_NOT_FOUND(1002, "商品不存在"),
+    
+    /** 订单不存在 */
+    ORDER_NOT_FOUND(1003, "订单不存在"),
+
+    /** 远程服务调用失败（连接不上、超时等） */
+    REMOTE_CALL_FAILED(2001, "服务调用失败，请稍后重试"),
 
     /** 未捕获的系统异常兜底 */
     SYSTEM_ERROR(5000, "系统繁忙，请稍后再试");

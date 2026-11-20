@@ -1,7 +1,7 @@
 # mini-mall 开发上下文文档（学习优先版）
 
 > 本文档供 AI 助手在**对话轮数过多、需要重启对话**时唤醒记忆，**只定规则和沉淀知识，不记录当前开发进度**。开发进度、遗留清单、下一步计划一律记录在 `DEV_LOG.md`（与本文档同目录）。恢复上下文时：先读本文档（规则+知识），再读 DEV_LOG.md（进度）。
-> 最后更新：2026-11-11（项目定位更正：面试准备项目非毕设，验收标准=用户能上机手写；新增讲解铁律 4 与注入心智模型）
+> 最后更新：2026-11-18（新增铁律 6：每阶段收尾必须更新 DEV_LOG 并连同代码提交推送到 GitHub；同步简历对齐后的路线图）
 
 ## 〇、文档使用规则（AI 助手必须遵守的铁律）
 
@@ -13,37 +13,83 @@
    - 框架一律当黑盒，一句话带过："Spring/MyBatis 内部干的"。**禁止**展开 DispatcherServlet、HandlerMapping、动态代理、MapperProxy 等框架内部结构，用户明确表示看不懂且不需要。
    - **一次只讲一个点**，信息量宁小勿大；不打比方（用户要求直接走链路）。
    - 框架的唯一存在形式 = 帮用户完成的三类动作：启动时造对象并塞字段（注入）、请求时把参数塞给方法、把返回值转成 JSON 发回浏览器。
+5. **每个模块必须有新知识**（2026-11-11 用户明确要求）：不允许某个模块只是重复基础增删改查。进入一个模块前，AI 先讲清该模块计划安排的新技术点清单，由用户确认后再动手；模块开发过程围绕这些新技术点展开。
+6. **每阶段收尾必须提交 GitHub**（2026-11-18 用户明确要求）：
+   - 每完成一个阶段（阶段 0 基线 / 阶段 A 微服务链路 / 阶段 B 硬核专题 / 阶段 C 收尾），必须执行一次完整的 GitHub 提交：`git add` → `git commit` → `git push origin main`。
+   - 提交前必须先把本阶段进度写入 `DEV_LOG.md`（完成什么、验收证据、遗留、下一步、当前楼层），**DEV_LOG.md 与代码在同一个提交里一并提交**，保证历史中"代码 + 进度"成对出现。
+   - 提交前必须 `mvn install -q -DskipTests` 编译通过；提交信息按 `feat: 阶段X xxx` / `docs: xxx` 格式，中文。
+   - **留痕粒度（2026-11-18 用户确认）**：每个可验收单元一个 commit（如新增 DTO、接入编排、容错处理各一次），DEV_LOG 按楼层汇总；留痕载体只认 **Git diff + DEV_LOG**，不额外维护 CHANGELOG 或每次会话的变更文件。
+   - 阶段内的楼层可增量提交，但阶段收尾这一次提交不可省略；提交后确认 `git status -sb` 干净且与 origin/main 一致。
 
 ## 一、项目一句话定位
 
 - **性质**：**面试准备项目**（求职 Java 后端方向），从零搭建的微商城（mini-mall），目标是用户**熟悉到自己能上机手写**全链路代码，并能向面试官讲清微服务架构。**所有代码以"用户自己能写出来"为验收标准，AI 尽量不代写，只讲解 + review**
 - **仓库**：`https://github.com/3314117689/mini-mall.git`（分支 `main`）
 - **本地路径**：`D:\bishe\workspace\gongju\eclipseworkspace\mini-mall`（git 仓库根），代码在 `v1/` 子目录
-- **IDE**：Eclipse（不用 IDEA）
+- **IDE**：IntelliJ IDEA 2026.3（安装目录 `D:\IDEA\IntelliJ IDEA 2026.3\bin`），2026-11-18 起由 Eclipse 切换而来
 - **技术栈**：Spring Boot + **原生 MyBatis**（mybatis-spring-boot-starter，手写 @Select/@Insert/@Update/@Delete 注解 SQL）+ MySQL + Lombok。**已决定不引入 MyBatis-Plus**（手写 SQL 更利于学习，原"引入 MP"计划作废）
 - **架构约定**：Controller → Service → Mapper 三层；统一返回 `Result<T>`（code=0 成功）；每个服务独占自己的数据库（db_user / db_product…），服务间将来通过 HTTP 调用，**不许直连对方库**
 
 ## 二、盖楼路线图（项目主结构与学习顺序）
 
-> 组织原则：每一层都是因为"上一层解决不了某个新问题"才出现。建楼顺序 = 学习顺序 = 依赖顺序。**当前建到哪一层、各层验收状态，见 DEV_LOG.md，本表不记进度。**
+> 组织原则：每一层都是因为"上一层解决不了某个新问题"才出现。建楼顺序 = 学习顺序 = 依赖顺序。**每层必须有明确的新技术点**（铁律 5），不做重复的 CRUD。
+> 技术栈总纲：**Spring Boot 单体 → Spring Cloud Alibaba 微服务**。全家桶 = Nacos（注册）+ OpenFeign（调用）+ Sentinel（熔断限流）+ Gateway（网关）+ Redis（缓存）+ JWT（鉴权）。
+> 约束：**代码量必须可控**——砍掉 MQ / 分布式事务 / Docker / 分布式锁 / Nacos Config（配置中心）这些重量级组件，每层保证 1-2 个 session 能推进完。
+> **当前建到哪一层、各层验收状态，见 DEV_LOG.md，本表不记进度。**
 
-| 层 | 触发问题 | 解法 | 验收标志 |
+### 版本映射（开发前统一对齐）
+
+> Spring Boot / Spring Cloud / Spring Cloud Alibaba 版本必须严格兼容，参考阿里云官方版本说明：
+> - Spring Boot 4.x → Spring Cloud 2024.x → Spring Cloud Alibaba 2023.x（具体版本开发时查表，父 POM 用 BOM 统一管理版本）
+> - 风险：当前父 POM 为 Boot 4.1.2，Alibaba / Sentinel / ShardingSphere 生态对 4.x 的适配必须在 L3 开工前查表确认；不适配就把全工程降到 Boot 3.5.x（业务代码基本不用改）
+
+### 分层路线图
+
+| 层 | 模块 | 触发问题 | 新技术点（面试高频） | 代码量级 | 验收标志 |
+|---|---|---|---|---|---|
+| **L0 地基** | mall-common + mall-user + mall-product | 单个服务增删改查 | 三层架构五件套 + MyBatis 注解 SQL + Lombok + Maven 多模块 | 大（已完成） | 五件套能白纸默写；两个服务 CRUD 验收通过 ✅ |
+| **L1 异常框架** | mall-common（共用） | 错误响应散乱 | Result / ErrorCode / BizException / GlobalExceptionHandler 四件套 | 极小（4 个类） | 原理讲透 + 默写 3 遍 ✅ |
+| **L2 订单服务 + RestTemplate** | mall-order（新模块） | 订单需用户+商品，但不许连别人的库 | **RestTemplate** HTTP 调用 + DTO 请求对象 + Service 业务编排 + 远程调用失败容错 | 中 | `POST /order` 落库成功；关掉 mall-product 下单能看到友好失败 ★微服务成立门槛 |
+| **L3 Nacos + OpenFeign** | 所有服务改 pom + yml | RestTemplate 地址写死，手写拼 URL 容易错 | **Nacos 注册中心**（解压运行+服务注册）+ **OpenFeign** 声明式调用（一个接口一个注解，比 RestTemplate 简洁）+ `@EnableFeignClients` + `@FeignClient` | 极小 | Feign 接口调 mall-product，代码里不再出现 `localhost:8082`，换成服务名；关掉 mall-product 下单不再报错而是走 Feign 的熔断降级 |
+| **L4 Sentinel 熔断限流** | 所有服务加依赖 + yml | 下游服务挂了上游跟着死（雪崩）；恶意请求把服务打垮 | **Sentinel**（解压运行+控制台）+ `@SentinelResource` 资源标记 + 降级方法 `fallback` + 流控规则（QPS 阈值） | 极小 | mall-product 接口限流到 QPS=10，快速连续请求第 11 次被 Sentinel 拦截返回提示；关掉 mall-product，mall-order 走 fallback 降级方法返回"商品服务不可用，请稍后重试" |
+| **L5 Redis 缓存** | mall-product 改 Service | 商品列表每次都查 MySQL，并发高了扛不住 | **Redis 安装**（Windows 版下载解压）+ Spring Data Redis + `@Cacheable` 注解自动缓存 + 缓存穿透/空值处理 | 小 | 第一次 `GET /product/list` 查 MySQL 写入 Redis，第二次直接返回缓存（断点验证不进 Mapper） |
+| **L6 JWT 登录鉴权** | mall-user 补注册登录 | 谁在下单？怎么识别用户？ | **JWT（jjwt，RS256 私钥签名 + JWKS 公钥端点）** + **BCrypt** 密码加密（存哈希不存明文）+ 拦截器统一验 token + **ThreadLocal** 存当前用户上下文 + 角色字段做 RBAC | 中 | 登录拿 token → 下单请求 Header 带 token → 拦截器解析出 userId → Controller 直接注入当前用户（不重复解析）；改 token 后验签失败 |
+| **L7 Gateway 网关** | mall-gateway（新模块） | 前端要记 N 个端口，鉴权散在每个服务 | **Spring Cloud Gateway** + RouteLocator 路由配置 + 全局过滤器（统一验 JWT）+ Gateway 内置限流（RequestRateLimiter） | 中 | 前端所有请求只打 `9000`（gateway 端口），路由到对应后端；gateway 层统一验 token，各后端服务可跳过鉴权 |
+| **L8 MySQL 优化专题** | mall-order 表 + SQL | 数据量大后深翻页慢、排序走 filesort、历史数据拖慢查询 | **联合索引防 filesort**（explain 前后对比）+ **延迟关联 vs 游标分页** + **按月 RANGE 分区** + 造 10 万条测试数据 | 小 | explain 能指出 type/key/Extra 的变化；深翻页耗时明显下降；分区裁剪命中 |
+| **L9 并发与一致性** | mall-order / mall-product | 高并发超卖、串行远程调用慢、ID 生成 | **线程池分级 + 反压**（拒绝策略）+ **CompletableFuture 编排 + orTimeout 超时降级** + **号段发号器**（Redis INCRBY + AtomicLong/CAS）+ **Redis Lua 原子扣减防超卖** | 中 | 并发压测不超卖；依赖超时走降级；订单号来自号段；线程池满时有兜底 |
+| **L10 SpringDoc + JSR303** | 所有服务加依赖 | 接口文档手写容易过时，入参校验散在业务代码 | **SpringDoc OpenAPI**（加依赖自动生成 Swagger UI）+ `@Valid` + `@NotBlank/@Min/@Size` 注解校验 | 极小 | 打开 `/swagger-ui/index.html` 能看到接口文档并在线调试；不传必填参数返回友好错误 |
+
+### 选做层（最小单元，主路线通关后按余量逐项加，每项独立可演示）
+
+| 编号 | 内容 | 最小单元 | 验收 |
 |---|---|---|---|
-| **L0 地基：三层架构五件套** | 单个服务的增删改查怎么做 | entity/mapper/service/impl/controller + 统一返回 + 多模块（mall-common/mall-user:8081/mall-product:8082） | 五件套能白纸默写；mall-user、mall-product 的 CRUD 验收通过 |
-| **L1 异常框架** | 失败时错误响应散乱，前端没法统一判断 | Result/BizException/ErrorCode/GlobalExceptionHandler 四件套 | 原理讲透 + 白纸默写 3 遍 |
-| **L2 订单服务 + 服务间调用** | 订单需要"用户+商品"数据，但不许连别人的库 | 新建 mall-order + HTTP 调用（先 RestTemplate 后 Feign） | `POST /order` 落库成功；**关掉 mall-product 再下单能看到友好失败提示**（服务容错素材）★最小可演示版本线（必须到达） |
-| **L3 Nacos 注册中心** | 调用地址写死 localhost:8081，服务多了管不过来 | 服务注册与按名发现、负载均衡 | 调用代码里不再出现硬编码 ip:port |
-| **L4 Gateway 网关** | 前端要记 N 个端口，鉴权没处放 | 统一入口 9000 + 路由转发 | 前端所有请求只发 9000 ★面试标准线（强烈建议到达） |
-| **L5+ 可选加分层** | 锦上添花 | JWT 登录鉴权 / 配置中心 / 分布式事务 / 前端页面 / 部署 | — （按时间余量决定做不做） |
+| M1 | MongoDB 订单快照 | 下单成功后写一条 order_snapshot 文档；`GET /order/{id}/snapshot` 查询 | 文档结构与订单表字段对齐，能讲清"为什么要文档建模" |
+| M2 | RabbitMQ 异步下单 | 下单落库后发 `order.created` 消息，消费者异步写通知记录 | 生产/消费日志可验证，关掉消费者不影响下单主流程 |
+| M3 | Sa-Token RBAC | 二选一：用 Sa-Token 替换 L6 自研鉴权，`@SaCheckRole` 保护管理接口 | 无角色访问管理接口返回无权限；与自研方案能讲清差异 |
+| M4 | ShardingSphere 读写分离 | 配置 ShardingSphere-JDBC 主从数据源（前置：MySQL 主从复制可用） | 写走主库、读走从库，日志可验证；环境不满足则只讲配置与原理 |
 
-**两条关键线的定义**：
-- 最少加 2 层（L1+L2）= 最初目标达成。硬标准：**微服务成立的最低门槛 = 服务之间通过 HTTP 接口协作，而不是共享数据库**
-- 标准 4 层（+L3+L4）= 面试说服力保障：没有注册中心和网关，"微服务"三个字在面试时容易被问"这和两个单体有什么区别"
+### 三条关键线
 
-**该层的坑（踩坑速查，按楼层归类）**：
-- L0：包少建一层导致 Mapper 扫描不到（必须 `com.mall.<服务名>.mapper`）；判空逻辑写反（查到返回、查不到才抛）；表结构与代码不一致（DB 列名下划线、Java 驼峰、靠 map-underscore-to-camel-case 映射，SQL 永远写数据库真实列名，不一致时定一方为标准另一方迁就）；金额用 BigDecimal 不用 double；改多模块文件时曾改串 yml（mall-user 的库被误改成 db_product），逐一确认路径
+- ★ **微服务成立线**（L2）：服务间 HTTP 协作、不共享数据库——最低门槛
+- ★ **Spring Cloud Alibaba 全家桶线**（L3+L4）：Nacos + Feign + Sentinel——简历上"熟悉 Spring Cloud Alibaba"的硬指标
+- ★ **面试标准线**（L3+L7）：注册中心 + 网关——面试官不会问"这和单体有什么区别"
+
+### 明确砍掉的技术（保持代码量可控，面试价值不足或太重）
+
+- ❌ MQ / 分布式事务：太重，需要生产者/消费者/事务消息配套，代码量暴增，消化不过来
+- ❌ Docker 部署：环境搭建不是后端核心考点，跳过
+- ❌ Nacos 配置中心：和注册中心二选一，注册中心面试高频更高
+- ❌ 分布式锁 / 库存扣减超卖：需要 Redis/Lua 或数据库乐观锁，引入后复杂度陡增
+- ❌ RabbitMQ / Kafka：同 MQ，重（M2 仅保留 RabbitMQ 一个最小异步场景，Kafka 口头讲）
+- ❌ Spring AI + MCP / RAG：本工程不落地（版本兼容风险高、代码量重），面试用过往经历口述
+
+### 踩坑速查（按楼层归类，新增坑到此追加）
+
+- L0：包少建一层导致 Mapper 扫描不到（必须 `com.mall.<服务名>.mapper`）；判空逻辑写反；表结构与代码不一致（SQL 永远写数据库真实列名）；金额用 BigDecimal；改多模块文件时曾改串 yml
 - L1：暂无
-- 环境：Eclipse Ctrl+点击跳转在本项目失效（其他项目正常，已搁置，不阻塞）
+- L3 预踩：**Spring Cloud BOM 版本号别写错**（2023.0.0 而非 2023.0.0.0）；父 POM 中 spring-boot-maven-plugin 必须放到 `<pluginManagement>` 里统一版本，避免 mall-common 这类库模块被 repackage 后 install 失败（common 不需要打 executable jar）
+- L3 预踩：**Gateway 用 WebFlux**，业务服务仍用 WebMVC——Gateway 模块别引 `spring-boot-starter-web`，会冲突
+- 环境：Eclipse 时期 Ctrl+点击跳转失效，2026-11-18 已切换到 IDEA，该问题不再关注
 
 ## 三、"怎么写"知识内核（面试手撕核心，本档最重要章节）
 
@@ -116,13 +162,14 @@
 3. **文件名不带手工版本号**（版本交给 Git 管理，避免 rename 断史）
 4. 提交信息风格：`feat: 任务单#0X xxx` / `docs: xxx` / `chore: xxx`
 5. v1.0 tag 指向任务单#01 交付快照（`64f52b7`）
+6. **阶段收尾提交（2026-11-18 新增）**：每完成一个阶段（阶段 0 / A / B / C），必须更新 DEV_LOG.md 后连同代码一起 commit 并 push；阶段内按可验收单元增量提交（一个单元一个 commit）；留痕只认 Git diff + DEV_LOG，不建 CHANGELOG。详见第〇节铁律 6。
 
 ## 五、协作约定（AI 助手注意）
 
 - 用户是 Java/Spring 初学者，**实现每个功能时用注释讲清"为什么这么设计"**，讲解需通俗（善用类比、从调用方视角倒推设计）
 - 用户重视先理解再动手，常问"为什么这样设计"；回答时先给结论再展开，不要堆术语
 - 编码后必须 `mvn install -q -DskipTests`（在 v1/ 目录下）编译验证再提交
-- Eclipse 元数据（.factorypath/.classpath/.project/.settings/）已在 .gitignore，勿提交
+- IDE 元数据已在 .gitignore（IDEA 的 `.idea/`、`*.iml`；Eclipse 遗留的 .factorypath/.classpath/.project/.settings/），勿提交
 - 文档放 `v1/docs/`，学习笔记放 `v1/notes/`
 - 中文交流；提交信息用中文
 - 改动涉及多个模块时，逐一确认目标文件路径，避免改串（见踩坑#5）

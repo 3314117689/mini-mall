@@ -97,7 +97,17 @@
 
 ---
 
+## L4 Sentinel 熔断限流（进行中）
+
+**1.（★★★）什么是 Sentinel 的"资源"？你项目里资源是怎么来的？**
+参考要点：资源 = 被保护代码的单位，流控/熔断规则都挂在资源名上。两个来路：加依赖后每个 Controller 接口自动成为 URL 资源（如 `/product/1`）；`@SentinelResource("名字")` 标在方法上自造资源。
+
+**2.（★★）你的 Sentinel 控制台怎么部署的？客户端怎么连上它的？**
+参考要点：控制台是独立 jar（1.8.9）自己启动，与业务工程的 Boot 版本无关（本项目跑在 8858，避开 Nacos 控制台 8080）；工程加 starter + yml 配 `spring.cloud.sentinel.transport.dashboard`，客户端起一个本地端口（8719 起，冲突自动顺延）定时向控制台发心跳/拉规则。
+
+---
+
 ## 待补楼层
 
-- L4 Sentinel：通关后按上文规则追加题目
+- L4 收尾后追加：fallback vs blockHandler、QPS 流控、熔断与降级区别
 - L5 及以后：逐层追加

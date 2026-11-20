@@ -39,6 +39,14 @@
             <artifactId>spring-cloud-starter-openfeign</artifactId>
         </dependency>
 
+        <!-- Sentinel：熔断限流（L4）。父工程没导 SCA BOM，版本号必须在这里写；
+             加了它，每个 Controller 接口自动成为可被监控/限流的资源 -->
+        <dependency>
+            <groupId>com.alibaba.cloud</groupId>
+            <artifactId>spring-cloud-starter-alibaba-sentinel</artifactId>
+            <version>${spring-cloud-alibaba.version}</version>
+        </dependency>
+
         <!-- 客户端负载均衡：负责把服务名换成实例地址，按服务名调用时必需 -->
         <dependency>
             <groupId>org.springframework.cloud</groupId>

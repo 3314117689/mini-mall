@@ -17,6 +17,25 @@
 
 ## 一、开发记录
 
+### 2026-11-20（L4-1 完成：三服务接入 Sentinel，控制台冒烟通过）
+
+- **代码变更（三个业务服务同步改，mall-common 不动）**：
+  1. mall-user / mall-product / mall-order 的 pom 各加 `spring-cloud-starter-alibaba-sentinel`（版本 `${spring-cloud-alibaba.version}` = 2025.1.0.0，内置 Sentinel 客户端 1.8.9）
+  2. 三个 application.yml 的 `spring.cloud` 下新增 `sentinel.transport`：`dashboard: 127.0.0.1:8858`、`port: 8719`
+- **环境**：sentinel-dashboard **1.8.9** 已下载到 `D:\bishe\environment\sentinel\sentinel-dashboard-1.8.9.jar`（22.7MB，GitHub release tag **不带 v 前缀**：`releases/download/1.8.9/...`）
+- **启动方式**：`java "-Dserver.port=8858" -jar sentinel-dashboard-1.8.9.jar`（PowerShell 下 `-D` 参数必须加引号，否则被拆成两个参数报 ClassNotFoundException；8858 是为避开 Nacos 控制台的 8080）
+- **端口分布（实测）**：控制台 8858；dashboard 自身占 8719；product=8720、user=8721、order=8722（客户端从 8719 起自动顺延）
+- **验收证据（本机实测）**：
+  1. `mvn install -q -DskipTests` 四模块编译通过
+  2. 三服务启动正常，8081/8082/8083 监听，GET /product/1、/user/1、/order/1 均正常返回
+  3. 客户端通信端口实测响应：`GET 127.0.0.1:8720/getRules?type=flow` 返回 `[]`，`/version` 返回 `1.8.9`
+  4. 控制台 API `GET 127.0.0.1:8858/app/names.json`（登录 sentinel/sentinel 后）返回 `["product-service","user-service","order-service"]`——三个应用心跳全部到达
+- **兼容性结论**：Boot 4.1.2 + SCA 2025.1.0.0 下 Sentinel 1.8.9 客户端**运行期可用**（应用注册 + 命令端口双验证），开工前评估的中等风险解除；控制台是独立 jar 与 Boot 版本无关
+- **踩坑**：dashboard 默认端口 8080 与 Nacos 控制台冲突，必须换端口启动；release 下载地址 tag 无 v 前缀，写 v1.8.9 会 404
+- **遗留**：无
+- **下一步**：L4-2 mall-product QPS 流控（控制台配 QPS=10，第 11 次被拦返回友好提示）
+- **当前楼层**：L4-1 完成
+
 ### 2026-11-20（L3 完成：OpenFeign 替换 RestTemplate，按服务名下单）
 
 - **代码变更（只在 mall-order）**：

@@ -11,6 +11,12 @@ spring:
       discovery:
         # 注册中心地址：Nacos 服务端是 8848（3.x 的 8080 只是控制台，别填错）
         server-addr: 127.0.0.1:8848
+    sentinel:
+      transport:
+        # Sentinel 控制台地址（本机 8858，避开 Nacos 控制台的 8080）
+        dashboard: 127.0.0.1:8858
+        # 本服务与控制台通信的端口；三服务同机时框架自动顺延 8720/8721
+        port: 8719
   datasource:
     driver-class-name: com.mysql.cj.jdbc.Driver
     # serverTimezone 必须指定，否则 8.x/9.x 驱动连接时会有时区问题

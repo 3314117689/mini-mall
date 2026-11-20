@@ -105,9 +105,15 @@
 **2.（★★）你的 Sentinel 控制台怎么部署的？客户端怎么连上它的？**
 参考要点：控制台是独立 jar（1.8.9）自己启动，与业务工程的 Boot 版本无关（本项目跑在 8858，避开 Nacos 控制台 8080）；工程加 starter + yml 配 `spring.cloud.sentinel.transport.dashboard`，客户端起一个本地端口（8719 起，冲突自动顺延）定时向控制台发心跳/拉规则。
 
+**3.（★★★）QPS 流控怎么配的？超阈值的请求经历了什么？**
+参考要点：控制台对资源 `/product/{id}` 配 QPS=10（grade=1）；超阈值的请求进不来业务代码，被框架拦截，走我实现的 BlockExceptionHandler 返回 HTTP 429 + `{"code":4290,"msg":"请求过于频繁，请稍后再试"}`。实测：1 秒内 15 个请求 = 10 过 + 5 拦。规则在控制台配、推送到客户端内存，改阈值不用重启服务。
+
+**4.（★★）为什么 URL 资源名是 `/product/{id}` 而不是 `/product/1`？**
+参考要点：Sentinel 的 Web 适配器按 Spring MVC 的 URL 模板登记资源，同一模式共用一条规则（/product/1、/product/2 共享阈值）；配规则时写模板不写具体路径，否则规则永远匹配不上。
+
 ---
 
 ## 待补楼层
 
-- L4 收尾后追加：fallback vs blockHandler、QPS 流控、熔断与降级区别
+- L4 收尾后追加：fallback vs blockHandler、熔断与降级区别
 - L5 及以后：逐层追加

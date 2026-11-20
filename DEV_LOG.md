@@ -17,6 +17,27 @@
 
 ## 一、开发记录
 
+### 2026-11-20（L4-2 完成：mall-product QPS 流控，第 11 个请求被拦）
+
+- **代码变更**：
+  1. mall-common 的 `ErrorCode` 新增 `FLOW_LIMITED(4290, "请求过于频繁，请稍后再试")`（分段约定新增 4xxx = Sentinel 拦截类）
+  2. mall-product 新增 `config/SentinelBlockConfig`：注册 `BlockExceptionHandler` Bean（接口来自 sentinel-spring-webmvc-**v6x**-adapter，Boot 4/Spring 7 专用），被拦截的请求统一返回 HTTP 429 + `{"code":4290,"msg":"请求过于频繁，请稍后再试","data":null}`
+- **规则配置（控制台 API 推送，非代码硬编码）**：
+  - `POST http://127.0.0.1:8858/v2/flow/rule`（单条增）body：`{"app":"product-service","ip":"127.0.0.1","port":8720,"resource":"/product/{id}","limitApp":"default","grade":1,"count":10,"strategy":0,"controlBehavior":0}`（grade=1 即 QPS，阈值 10）
+  - 推送后客户端 `GET 127.0.0.1:8720/getRules?type=flow` 能回读到该规则
+- **资源名关键结论**：URL 资源名是 **URL 模板 `/product/{id}`**，不是具体路径 `/product/1`——v6x 适配器自动按 Spring MVC 的模板登记资源（从客户端 `/clusterNode` 接口实测确认）
+- **验收证据（本机实测）**：
+  1. 单进程 1 秒内连发 15 次 `GET /product/1`：**pass=10, block=5**，第 11 个起全部返回 HTTP 429 + code=4290
+  2. 之前用 PowerShell 循环逐个 curl 时得 13/2——15 次跨了两个秒级窗口，验证口径必须"单进程一秒内连发"
+- **踩坑**：
+  1. Boot 4 默认换用 Jackson 3，容器里没有 `com.fasterxml.jackson.databind.ObjectMapper` Bean——拦截处理器注入 ObjectMapper 启动失败；改为按 ErrorCode 手工拼固定 JSON（code/msg 仍以 ErrorCode 为唯一来源）
+  2. 控制台规则 API：列表查询 `GET /v2/flow/rules?app=...`，**单条新增是 `POST /v2/flow/rule`**（复数路径 POST 会 405）
+  3. PowerShell 向 curl 传 JSON 参数会吞内嵌双引号导致 400，body 先写文件再 `--data @file`
+  4. mall-product 旧 jar 被运行中的服务进程锁定，repackage 前必须先停服务
+- **遗留**：无
+- **下一步**：L4-3 mall-order 降级（getUser/getProduct 搬进独立 RemoteService + `@SentinelResource` + fallback，停 product 验证降级文案）
+- **当前楼层**：L4-2 完成
+
 ### 2026-11-20（L4-1 完成：三服务接入 Sentinel，控制台冒烟通过）
 
 - **代码变更（三个业务服务同步改，mall-common 不动）**：

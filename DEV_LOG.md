@@ -17,6 +17,22 @@
 
 ## 一、开发记录
 
+### 2026-11-20（L3-1 验收通过：Nacos 3.3.0 + 三服务注册成功）
+
+- **环境**：Nacos Server **3.3.0**（1.4.7 已弃用——Nacos 官方规定 2.x 以上客户端连不上 1.x 服务端），解压到 `D:\bishe\environment\nacos`
+- **本地配置**（`conf\application.properties`，不在仓库内）：
+  1. 关闭鉴权：`nacos.core.auth.enabled/admin.enabled/console.enabled=false`（3.3 默认开启，本地学习环境关闭）
+  2. 预置 `nacos.plugin.auth.nacos.token.secret.key`（Base64，≥32 字节）与 `server.identity.key/value`——不预置的话 `startup.cmd` 会交互式追问，后台启动会卡住
+- **启动方式**：`bin\startup.cmd -m standalone -f microservice`；服务端 **8848**，控制台 **8080**
+- **踩坑**：Nacos 3.3 默认加载 AI 插件，启动时会扫描 PATH，遇到 `\\?\` 前缀路径直接抛 `InvalidPathException` 退出；用 `-f microservice` 限定功能模式可规避
+- **验收证据**：
+  1. `GET http://127.0.0.1:8848/nacos/v3/admin/ns/service/list` 返回 3 个服务，`healthyInstanceCount=1` 各一个：`product-service`、`user-service`、`order-service`
+  2. 8081/8082/8083 三个端口均监听
+- **结论**：**SCA 2025.1.0.0 在 Boot 4.1.2 上运行期可用**，路线 B（降级 Boot 3.5.x）不再需要，仅保留为备选
+- **遗留**：三个服务与 Nacos 由工具后台进程启动，后续可在 IDEA 里重启接管
+- **下一步**：L3-2 服务发现心智模型 → L3-3 OpenFeign 声明式调用（替换 RestTemplate）
+- **当前楼层**：L3-1 完成
+
 ### 2026-11-20（L3-1 Nacos 注册中心接入，待启动验证）
 
 - **完成**：

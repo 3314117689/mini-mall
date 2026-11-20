@@ -90,6 +90,7 @@
 
 - L0：包少建一层导致 Mapper 扫描不到（必须 `com.mall.<服务名>.mapper`）；判空逻辑写反；表结构与代码不一致（SQL 永远写数据库真实列名）；金额用 BigDecimal；改多模块文件时曾改串 yml
 - L1：暂无
+- L3 预踩：**Nacos Server 版本必须 3.x**（2.x 及以上客户端连不上 1.x 服务端）；3.x 服务端端口 8848、**控制台端口 8080**；3.3 默认开启鉴权，本地可关闭，但 `startup.cmd` 仍会交互式追问 token 密钥，后台启动需先在 `conf\application.properties` 预置密钥；3.3 默认加载 AI 插件会扫描 PATH，遇 `\\?\` 前缀路径崩溃，用 `-f microservice` 规避
 - L3 预踩：**Spring Cloud BOM 版本号别写错**（2023.0.0 而非 2023.0.0.0）；父 POM 中 spring-boot-maven-plugin 必须放到 `<pluginManagement>` 里统一版本，避免 mall-common 这类库模块被 repackage 后 install 失败（common 不需要打 executable jar）
 - L3 预踩：**Gateway 用 WebFlux**，业务服务仍用 WebMVC——Gateway 模块别引 `spring-boot-starter-web`，会冲突
 - 环境：Eclipse 时期 Ctrl+点击跳转失效，2026-11-18 已切换到 IDEA，该问题不再关注

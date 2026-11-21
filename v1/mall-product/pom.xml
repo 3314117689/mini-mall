@@ -47,6 +47,13 @@
             <artifactId>mybatis-spring-boot-starter</artifactId>
         </dependency>
 
+        <!-- Redis：缓存客户端（L5）。引入后 Spring 自动装配 Redis 连接工厂与模板；
+             本机 Redis 5.0.5，端口 6379，连接信息在 application.yml -->
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-data-redis</artifactId>
+        </dependency>
+
         <!-- MySQL 驱动：版本由 Spring Boot 父工程管理 -->
         <dependency>
             <groupId>com.mysql</groupId>

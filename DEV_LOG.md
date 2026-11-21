@@ -18,6 +18,29 @@
 
 ## 一、开发记录
 
+### 2026-11-21（L5-1/L5-2 完成：Redis 环境就绪 + mall-product 接入 Spring Data Redis——commit `待填`）
+
+改动一句话：mall-product 的 pom 加 `spring-boot-starter-data-redis`，yml 加 `spring.data.redis` 连接配置；**无 Java 代码改动**。Redis 用本机已有 5.0.5（用户指定，免安装）。
+
+**L5-1 环境链路（无代码）**
+
+1. 用户已有 Redis 5.0.5：`D:\bishe\environment\redis-5.0.5-bin\redis-5.0.5-bin\`（redis-server.exe / redis-cli.exe / redis.conf）。
+2. 启动：`redis-server.exe` 直接运行（默认端口 6379，无密码，读写当前目录 dump.rdb）。
+3. 验证：`redis-cli ping` → PONG。
+
+**L5-2 接入链路（启动视角）**
+
+1. `mall-product/pom.xml` 加 `spring-boot-starter-data-redis`（版本由 Boot 父工程仲裁）→ 引入 Lettuce 客户端 + Spring Data Redis 自动装配。
+2. `application.yml` 加 `spring.data.redis.host=127.0.0.1 / port=6379`（Boot 3+ 前缀是 `spring.data.redis`，老教程的 `spring.redis` 已废弃）。
+3. `mvn install -q -DskipTests` 四模块编译通过。
+4. 启动 mall-product → `GET /product/1` 返回 200 `{"code":0,...}`。
+5. Redis 连接是**懒加载**的：服务启动时并不真正连 Redis，第一次有缓存读写才建立连接（L5-3 实测证明连通性）。
+
+**坑**：① 8082 被一个**从 IDEA 启动的旧版 product-service 进程**占用（用户以为已停，实际还活着且是没带 Redis 依赖的旧 classpath）——新 jar 启动报 `Port 8082 already in use`，先杀旧进程（PID 43232）再启动新 jar 才通过；教训：**repackage/换 jar 前先确认端口占用进程不是旧实例**。② 沙箱 shell 里用 Start-Process 拉起的 redis-server 会随会话被回收，Redis 需用托管后台方式启动（用户以后在 IDEA/自己终端里跑则无此问题）。
+
+**下一步**：L5-3 @Cacheable 商品查询缓存 + RedisCacheManager（TTL/JSON 序列化），断点验证"第二次查询不进 Mapper"。
+**当前楼层**：L5-1/L5-2 完成
+
 ### 2026-11-20（L4-3 完成：mall-order 降级——commit `08e530c`）
 
 改动一句话：远程调用收进新文件 `RemoteService`，getUser/getProduct 变成 Sentinel 资源；`ErrorCode` 删 2001、加 2002/2003；`OrderServiceImpl` 只换调用入口，编排逻辑一行没动。

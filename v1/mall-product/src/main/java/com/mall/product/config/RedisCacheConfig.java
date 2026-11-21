@@ -29,16 +29,17 @@ public class RedisCacheConfig {
 		RedisCacheConfiguration config = RedisCacheConfiguration.defaultCacheConfig()
 				// 缓存 30 分钟后自动过期；到期后再查询就回源查 MySQL 并重新写入
 				.entryTtl(Duration.ofMinutes(30))
-				// 默认不缓存 null（查不到的商品不进 Redis）；缓存穿透的空值缓存放到 L5-4 再打开
-				.disableCachingNullValues()
 				// 值用 JSON 序列化存进 Redis（Jackson 3 版序列化器，配 Boot 4）。
 				// enableDefaultTyping：JSON 里多存一个 "@class" 字段记下对象类型，
-				// 反序列化时才知道这个 JSON 该转回 Product 而不是 Map
+				// 反序列化时才知道这个 JSON 该转回 Product 而不是 Map；
+				// enableSpringCacheNullValueSupport：允许把 null 也写进缓存（L5-4 空值缓存防穿透），
+				// 框架会用一个 NullValue 标记来存，而不是真去序列化 null
 				.serializeValuesWith(RedisSerializationContext.SerializationPair
 						.fromSerializer(GenericJacksonJsonRedisSerializer.create(b -> b
 								.enableDefaultTyping(BasicPolymorphicTypeValidator.builder()
 										.allowIfBaseType(Object.class)
-										.build()))));
+										.build())
+								.enableSpringCacheNullValueSupport())));
 		return RedisCacheManager.builder(connectionFactory)
 				.cacheDefaults(config)
 				.build();

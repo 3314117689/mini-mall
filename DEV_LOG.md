@@ -15,8 +15,64 @@
 4. 涉及跨服务调用时必须说明：**URL 怎么拼出来 → 命中哪个服务的哪个 Controller 的哪一行 → 返回结果按什么类型解析**。
 
 > 本条是 `AI_CONTEXT.md` 铁律 4 的具体化，两者冲突时以本条为准。
+5. **读码先分"框架固定 / 自己动手"两类（2026-11-21 新增，详见 AI_CONTEXT 铁律 10）**：框架固定的不用过多思考，会照抄 + 一句话说清作用；自己写的每个格子都要能答"为什么是这个值"——这就是面试考点的直接来源。目的只有两个：能写项目 + 面试流畅讲明白。**边界**：分桶只管"读码/写码"；讲给面试官听的输出永远按本节链路规则走（数据从哪来→经过哪一行→变成什么→传到哪去），分桶表格不是面试答案，链路才是。
 
 ## 一、开发记录
+
+### 2026-11-21（L5-4 完成：缓存穿透 + 空值缓存）
+
+改动一句话：把"回源查库"抽到新类 `ProductCacheService.queryById`（带 `@Cacheable`），查不到返回 null 不抛异常；`ProductServiceImpl.getById` 改为调它、拿到 null 再抛 1002；`RedisCacheConfig` 去掉 `disableCachingNullValues()`、序列化器加 `enableSpringCacheNullValueSupport()`。
+
+**一、为什么要动结构（关键决策）**
+
+`@Cacheable` 只在"被别的类调用"时生效（同类 `this.` 调用绕过代理，和 L4 收口类同一个坑）。而空值缓存要求方法**返回 null 而不是抛异常**（异常永远不会被缓存）。两个约束叠加 → 把回源方法独立成 `ProductCacheService`，由 `ProductServiceImpl` 注入调用。
+
+**二、不回源链路（第 2 次请求 id=999）**
+
+1. `ProductController:26` → `productService.getById(999)` → `ProductServiceImpl:29` 打印"查询商品, id=999"。
+2. `ProductServiceImpl:30` → `productCacheService.queryById(999)` → 走代理 → 查 Redis `product::999` → **命中**（值是 NullValue 标记）→ 直接返回 null。
+3. 框架把 NullValue 还原成 null → `ProductServiceImpl:32` 判空为真 → `:33` warn → `:34` `throw BizException(PRODUCT_NOT_FOUND)`。
+4. 全局异常处理器 → `{"code":1002,"msg":"商品不存在"}`。
+5. **关键证据**：日志里没有"回源 MySQL 查询商品"、没有 SQL。
+
+**三、回源链路（第 1 次请求 id=999）**
+
+`ProductServiceImpl:30` → `ProductCacheService.queryById` 未命中 → `:26` 打印"回源 MySQL 查询商品, id=999" → `:27` `productMapper.selectById(999)` → SQL `Total: 0` → 返回 null → 框架把 **null 也写进 Redis**（序列化成 NullValue 标记，TTL 30 分钟）→ 回到 `ProductServiceImpl` 抛 1002。
+
+**四、命中链路（已存在的商品 id=2）**
+
+`ProductServiceImpl:29` 打印"查询商品, id=2" → `ProductCacheService.queryById(2)` 命中 → 返回 Product → 判空通过 → 返回给 Controller。**`ProductCacheService` 里那行日志不打印 = 命中证据**。
+
+**验收（实测，8099 端口独立实例 + 原 8082 回归）**
+
+| 场景 | 日志"回源" | SQL | Redis | 返回 |
+|---|---|---|---|---|
+| 999 第 1 次 | 有 | 1 条 Total:0 | 写入 NullValue，TTL 1799 | 1002 |
+| 999 第 2 次 | **无** | **无** | 命中 | 1002 |
+| 2（已缓存） | 无 | 无 | 命中 | code=0 |
+| 1（已过期） | 有 | 1 条 | 重新写入 | code=0 |
+
+`redis-cli get product::999` 的值是 JDK 序列化的 `org.springframework.cache.support.NullValue` 标记（不是乱码 bug，是框架存空值的专用占位对象）。
+
+**坑**：① `@Cacheable` 挪回同一个类里写会直接失效（this 调用绕过代理）；② 只在配置里放开 null 还不够，序列化器必须 `enableSpringCacheNullValueSupport()`，否则写 null 会报序列化错误；③ 空值缓存也有 TTL（本项目 30 分钟），到期后会再回源一次——这是"空值缓存 + TTL"组合的正常行为。
+
+**遗留**：空值 TTL 与正常值共用 30 分钟；若要更短（如 1-5 分钟），可用 `RedisCacheManager.builder().withCacheConfiguration("product", ...)` 单独配，本项目从简不做。
+
+**下一步**：L5-5 `@CacheEvict` 更新/删除时删缓存。
+**当前楼层**：L5-4 完成
+
+### 2026-11-21（L5-3 详解 + 读码思想沉淀："框架固定 vs 自己动手"，写入 AI_CONTEXT 铁律 10）
+
+本轮不改代码，专讲 L5-3（RedisCacheConfig + @Cacheable 链路）。用户暴露三个卡点：①自定义命名 vs 框架固定写法分不清；②参数/返回值"谁给谁"在框架加入后理不清；③疑问堆积时不知道先解决谁。讲解后用户提炼出核心思想并确认记录：
+
+- **核心思想（唯一目的：能写项目 + 面试流畅讲明白）**：读代码先分两类——
+  - 框架固定的（注解 / API / Builder 链 / 模板配置）：**不需要过多思考**，会照抄 + 一句话说清"它改变了什么行为"；
+  - 自己写的（名字 / 数值 / 策略）：**唯一的思考对象**，每个格子必须能答"为什么是这个值"。
+- **面试口径直接由分类生成**：自己定的格子 = 面试考点（TTL 权衡、JSON 序列化原因、null 缓存策略）；框架固定的 = 面试一句话带过。L5-3 全段自由度仅 6 格（分区名 / key / TTL / null 策略 / 序列化格式 / @EnableCaching 开关）。
+- 辅助读法（服从核心分类）：看 `()` 判"谁给谁"、链式拆行平铺、疑问按身份级→流动级→细节级排序。
+- 用户确认：✅ 2026-11-21（已按用户口径重写入 AI_CONTEXT 铁律 10 + 本文件〇节第 5 条）
+- **下一步**：L5-4 缓存穿透 + 空值缓存
+- **当前楼层**：L5-3 完成（含讲解收尾）
 
 ### 2026-11-21（L5-3 完成：@Cacheable 商品查询缓存 + RedisCacheManager 定制）
 

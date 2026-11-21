@@ -145,6 +145,15 @@
 **6.（★★）@Cacheable 的 key 是怎么拼出来的？**
 参考要点：`cacheNames::key`——本项目 key 是 `product::1`；`key="#id"` 是 SpEL，把方法参数当缓存 key。同一个 cacheNames 就是一个分区，删缓存/统计都按分区来。
 
+**7.（★★★）什么是缓存穿透？你怎么解决的？**
+参考要点：查一个数据库里根本不存在的数据（如 id=999），缓存永远没有、每次请求都打到 MySQL，恶意刷就能打垮数据库。解决：**空值缓存**——查不到也往 Redis 写一个 null（框架用 NullValue 标记存，需序列化器 `enableSpringCacheNullValueSupport()`），下次同 id 直接命中、不再回源。注意 null 也有 TTL，到期会再回源一次。
+
+**8.（★★★）为了做空值缓存，为什么要把查询方法拆到另一个类？**
+参考要点：两个约束叠加——① 空值缓存要求"查不到返回 null"，不能抛异常（**异常永远不会被缓存**，抛异常就等于每次都打库）；② `@Cacheable` 只在被**别的类**调用时生效，同类 `this.` 调用绕过代理。所以把回源查询放进 `ProductCacheService.queryById`，由 `ProductServiceImpl` 注入调用；判空抛 1002 留在 ProductServiceImpl。
+
+**9.（★★）空值缓存有什么副作用？怎么缓解？**
+参考要点：① 数据后来真的新增了，缓存里还留 null，最长 TTL 内查不到 → 用较短 TTL（如 1-5 分钟）缓解；② 大量不同 id 的 null 会占内存 → 加 key 前缀/限流，或用布隆过滤器提前挡掉。本项目从简：null 与正常值共用 30 分钟 TTL。
+
 ---
 
 ## 待补楼层

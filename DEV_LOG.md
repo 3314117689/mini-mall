@@ -392,7 +392,7 @@ userId=999 下单：`RemoteService:45` HTTP 正常返回 `{code:1001}` → `Remo
 | L2 | Spring Cloud（前置） | RestTemplate Bean 与超时、DTO 与 Entity 的区别、Service 业务编排、远程调用失败转 BizException | `RestTemplateConfig`、`OrderCreateDTO/ProductDTO/UserDTO`、下单编排 | 服务端算金额；关掉商品服务返回友好失败 | 代码完成；泛型已口头讲通，手写延后至笔试专项（见三、台账） |
 | L3 | Spring Cloud | Nacos 注册与发现、`@EnableFeignClients`/`@FeignClient`、服务名替代 IP、客户端负载均衡 | 两个 Feign 接口，替换 RestTemplate | 代码无 `localhost:8082`，按服务名调用成功 | 已完成 |
 | L4 | Spring Cloud | Sentinel 资源、`@SentinelResource`、fallback、QPS 流控、熔断与降级区别 | 商品查询资源 + fallback 方法 + 控制台规则 | 超阈值被拦截；停服务走降级文案 | 已完成 |
-| L5 | Redis / Spring Cache | `@Cacheable/@CacheEvict`、RedisCacheManager、TTL、缓存穿透与空值缓存、更新时删缓存 | 商品查询缓存 + 更新删缓存 | 第二次查询无 SQL 日志；空值也被缓存 | 未开始 |
+| L5 | Redis / Spring Cache | `@Cacheable/@CacheEvict`、RedisCacheManager、TTL、缓存穿透与空值缓存、更新时删缓存 | 商品查询缓存 + 更新删缓存 | 第二次查询无 SQL 日志；空值也被缓存 | 进行中（L5-1~L5-4 完成，待 L5-5 `@CacheEvict`） |
 | L6 | JWT（RS256+JWKS）/ BCrypt / RBAC | RSA 密钥对、RS256 签名与验签、JWKS 公钥端点、BCrypt、拦截器统一验 token、ThreadLocal 上下文与清理、角色校验 | `JwtUtil`、`/auth/login`、`/auth/jwks`、`LoginInterceptor`、`UserContext` | 登录→下单链路通；篡改 token 被拒；无角色被拒 | 未开始 |
 | L7 | Spring Cloud Gateway | 路由断言与过滤器、全局过滤器、统一鉴权、WebFlux 与 WebMVC 差异 | `mall-gateway` 路由 + `JwtAuthGlobalFilter` | 只打 9000 可访问三服务；无 token 被网关拦截 | 未开始 |
 | L8 | MySQL 索引与 SQL 优化 | B+ 树与最左前缀、filesort 成因、explain 关键字段、延迟关联、游标分页、RANGE 分区与分区裁剪 | 测试数据脚本、联合索引、三种分页写法 | explain 前后对比 + 耗时对比；分区裁剪命中 | 未开始 |

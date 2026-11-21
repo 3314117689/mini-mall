@@ -19,6 +19,44 @@
 
 ## 一、开发记录
 
+### 2026-11-22（L5-5 完成：更新/删除时删缓存 @CacheEvict）
+
+改动一句话：`ProductServiceImpl.update` 加 `@CacheEvict(cacheNames="product", key="#product.id")`，`deleteById` 加 `@CacheEvict(cacheNames="product", key="#id")`。
+
+**一、为什么必须删（不删的后果）**
+
+`@Cacheable` 是"读的时候拿缓存"，写库时缓存不会自动跟着变。改完价格后 Redis 里还是旧值，TTL 内（最长 30 分钟）用户看到的都是旧价格——这就是**缓存与数据库不一致**。解法有两种：**删缓存**（下次查询回源重建，最简单）或**更新缓存**（容易出并发覆盖问题，不推荐）。本项目选删缓存。
+
+**二、链路：更新商品（PUT /product，id=2）**
+
+1. `ProductController:36` → 代理进入 `ProductServiceImpl.update` → `:51` 打印"更新商品, id=2"。
+2. `:53` `productMapper.update(product)` → SQL `update product set name=?, price=?, stock=? where id=?` → `Updates: 1`。
+3. 方法正常返回 → **框架自动完成**：按 `key="#product.id"` 拼出 `product::2`，`DEL` 掉这个 key。
+4. 下一次 `GET /product/2` → Redis 没有 → 回源 MySQL → 拿到新价 → 重新写入缓存。
+
+**三、链路：删除商品（DELETE /product/888）**
+
+`:64` `deleteById(888)` → SQL `delete ... where id=?` → `Updates: 1` → 方法返回 → 框架 `DEL product::888`。
+
+**四、实测证据（8099 独立实例）**
+
+| 动作 | 日志 | Redis |
+|---|---|---|
+| GET /product/2（建缓存） | 回源 1 次 | `product::2` 有值，ttl 1794 |
+| PUT 改价 25.50（`Updates: 1`） | 更新商品 | **`product::2` 变 nil** |
+| GET /product/2 | **回源**，`Total: 1`，价格 25.50 | 重建，值为新价 |
+| DELETE 存在的 888（`Updates: 1`） | 删除商品 | **`product::888` 变 nil** |
+
+**坑（本次实测踩到）**：
+① `@CacheEvict` 默认 `beforeInvocation=false`，即**方法成功返回后才删**。实测 DELETE 一个不存在的 888：SQL `Updates: 0` → 抛 1002 → **key 没有被删**（残留的空值缓存还在）。理解成"库没改成功，缓存也就不动"，方向是对的；但反过来也说明：如果业务要"无论成败都清缓存"，得写 `beforeInvocation=true`。
+② `@CacheEvict` 的 key 拼法必须和 `@Cacheable` **完全一致**（`product::id`），否则删的是另一个 key，等于没删。
+③ update 用 `#product.id` 依赖方法参数名（Spring Boot 父工程默认开启 `-parameters`）；如果参数名丢失，会启动即报错，改用 `#p0.id` 可绕开。
+
+**验收**：改价后缓存立即消失、再查是新价；删除后缓存消失；不存在的 id 删除失败时缓存不动。
+
+**下一步**：L5 收尾（缓存整体复盘/演示 + 简历表述），之后进下一楼层。
+**当前楼层**：L5-5 完成（L5 全部完成）
+
 ### 2026-11-21（L5-4 完成：缓存穿透 + 空值缓存）
 
 改动一句话：把"回源查库"抽到新类 `ProductCacheService.queryById`（带 `@Cacheable`），查不到返回 null 不抛异常；`ProductServiceImpl.getById` 改为调它、拿到 null 再抛 1002；`RedisCacheConfig` 去掉 `disableCachingNullValues()`、序列化器加 `enableSpringCacheNullValueSupport()`。
@@ -392,7 +430,7 @@ userId=999 下单：`RemoteService:45` HTTP 正常返回 `{code:1001}` → `Remo
 | L2 | Spring Cloud（前置） | RestTemplate Bean 与超时、DTO 与 Entity 的区别、Service 业务编排、远程调用失败转 BizException | `RestTemplateConfig`、`OrderCreateDTO/ProductDTO/UserDTO`、下单编排 | 服务端算金额；关掉商品服务返回友好失败 | 代码完成；泛型已口头讲通，手写延后至笔试专项（见三、台账） |
 | L3 | Spring Cloud | Nacos 注册与发现、`@EnableFeignClients`/`@FeignClient`、服务名替代 IP、客户端负载均衡 | 两个 Feign 接口，替换 RestTemplate | 代码无 `localhost:8082`，按服务名调用成功 | 已完成 |
 | L4 | Spring Cloud | Sentinel 资源、`@SentinelResource`、fallback、QPS 流控、熔断与降级区别 | 商品查询资源 + fallback 方法 + 控制台规则 | 超阈值被拦截；停服务走降级文案 | 已完成 |
-| L5 | Redis / Spring Cache | `@Cacheable/@CacheEvict`、RedisCacheManager、TTL、缓存穿透与空值缓存、更新时删缓存 | 商品查询缓存 + 更新删缓存 | 第二次查询无 SQL 日志；空值也被缓存 | 进行中（L5-1~L5-4 完成，待 L5-5 `@CacheEvict`） |
+| L5 | Redis / Spring Cache | `@Cacheable/@CacheEvict`、RedisCacheManager、TTL、缓存穿透与空值缓存、更新时删缓存 | 商品查询缓存 + 更新删缓存 | 第二次查询无 SQL 日志；空值也被缓存 | 完成（L5-1~L5-5） |
 | L6 | JWT（RS256+JWKS）/ BCrypt / RBAC | RSA 密钥对、RS256 签名与验签、JWKS 公钥端点、BCrypt、拦截器统一验 token、ThreadLocal 上下文与清理、角色校验 | `JwtUtil`、`/auth/login`、`/auth/jwks`、`LoginInterceptor`、`UserContext` | 登录→下单链路通；篡改 token 被拒；无角色被拒 | 未开始 |
 | L7 | Spring Cloud Gateway | 路由断言与过滤器、全局过滤器、统一鉴权、WebFlux 与 WebMVC 差异 | `mall-gateway` 路由 + `JwtAuthGlobalFilter` | 只打 9000 可访问三服务；无 token 被网关拦截 | 未开始 |
 | L8 | MySQL 索引与 SQL 优化 | B+ 树与最左前缀、filesort 成因、explain 关键字段、延迟关联、游标分页、RANGE 分区与分区裁剪 | 测试数据脚本、联合索引、三种分页写法 | explain 前后对比 + 耗时对比；分区裁剪命中 | 未开始 |

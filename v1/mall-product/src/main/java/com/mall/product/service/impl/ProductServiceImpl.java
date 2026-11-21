@@ -1,6 +1,7 @@
 package com.mall.product.service.impl;
 
 import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.cache.annotation.CacheEvict;
 import org.springframework.stereotype.Service;
 
 import com.mall.common.exception.BizException;
@@ -44,6 +45,10 @@ public class ProductServiceImpl implements ProductService {
 		return product.getId();
 	}
 
+	// L5-5：改完数据必须让缓存失效，否则后面查询一直读到旧值。
+	// @CacheEvict 默认在方法成功执行完之后执行（抛异常则不删，库也没改，正好一致）。
+	// key 用 #product.id，两个方法必须和 @Cacheable 用同一个 key 拼法（product::id）才对得上。
+	@CacheEvict(cacheNames = "product", key = "#product.id")
 	@Override
 	public void update(Product product) {
 		log.info("更新商品, id={}", product.getId());
@@ -54,6 +59,7 @@ public class ProductServiceImpl implements ProductService {
 		}
 	}
 
+	@CacheEvict(cacheNames = "product", key = "#id")
 	@Override
 	public void deleteById(Long id) {
 		log.info("删除商品, id={}", id);

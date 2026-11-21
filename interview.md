@@ -136,6 +136,15 @@
 **3.（★）Redis 在你的机器上怎么部署的？**
 参考要点：Windows 版 Redis 5.0.5（社区维护版，官方不出 Windows 版），解压直接 `redis-server.exe` 启动，默认端口 6379；`redis-cli ping` 返回 PONG 即存活。
 
+**4.（★★★）@Cacheable 是怎么工作的？怎么验证缓存真的生效了？**
+参考要点：方法执行前框架先按 `cacheNames::key` 拼 key 查 Redis，命中直接返回缓存值、**方法体一行不执行**；没命中才进方法体查库，返回值被框架顺手写进 Redis。验证：第 2 次请求服务日志零 SQL（方法里 log.info 都没打印）、Redis 里出现 `product::1`、命中时 TTL 只衰减不重置。
+
+**5.（★★★）为什么默认的缓存序列化不能用，你要自己配 RedisCacheManager？**
+参考要点：默认用 JDK 序列化——redis-cli 里全是乱码没法看，且实体必须实现 Serializable、跨语言读不了；自己声明 RedisCacheManager Bean：TTL 30 分钟防旧值永久滞留 + JSON 序列化（`enableDefaultTyping` 让 JSON 带 @class 字段，反序列化才知道转回哪个类，BigDecimal 这类也会带类型包裹）。
+
+**6.（★★）@Cacheable 的 key 是怎么拼出来的？**
+参考要点：`cacheNames::key`——本项目 key 是 `product::1`；`key="#id"` 是 SpEL，把方法参数当缓存 key。同一个 cacheNames 就是一个分区，删缓存/统计都按分区来。
+
 ---
 
 ## 待补楼层

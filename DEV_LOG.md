@@ -18,7 +18,44 @@
 
 ## 一、开发记录
 
-### 2026-11-21（L5-1/L5-2 完成：Redis 环境就绪 + mall-product 接入 Spring Data Redis——commit `待填`）
+### 2026-11-21（L5-3 完成：@Cacheable 商品查询缓存 + RedisCacheManager 定制）
+
+改动一句话：启动类加 `@EnableCaching`；新增 `RedisCacheConfig`（TTL 30 分钟 + JSON 序列化）；`ProductServiceImpl.getById` 加 `@Cacheable(cacheNames="product", key="#id")`。**update/deleteById/save 未动**（L5-5 再加 @CacheEvict）。
+
+**一、缓存链路（请求视角，按代码顺序走）**
+
+请求：`GET /product/1`（第 1 次，Redis 无 key）
+
+1. `ProductController` 接参调 `productService.getById(1)` → 调用先经过框架的缓存拦截（框架自动完成）。
+2. 框架按 `@Cacheable(cacheNames="product", key="#id")` 拼 key：`product::1` → 查 Redis → **miss**。
+3. 没命中 → 真正进 `ProductServiceImpl:31 getById` → `log.info("查询商品, id=1")` → `productMapper.selectById(1)` 查 MySQL → 返回 `Product{id:1, price:9.90}`。
+4. 框架把返回值交给 `RedisCacheConfig:37` 配的序列化器 → JSON 写入 Redis，key=`product::1`，TTL=1800 秒。
+5. redis-cli 实测值：`{"@class":"com.mall.product.entity.Product","id":1,"name":"测试商品","price":["java.math.BigDecimal",9.90],"stock":100}`——`@class` 字段是 `enableDefaultTyping` 干的，反序列化时靠它知道转回 Product；BigDecimal 被 `["java.math.BigDecimal",9.90]` 包着也是同一机制。
+
+**二、第 2 次同请求（缓存命中）**
+
+1. 框架查 Redis：key `product::1` **hit** → 直接把 JSON 反序列化成 Product 返回。
+2. `ProductServiceImpl.getById` **一行都没执行**——连方法里第一行 `log.info("查询商品")` 都没打印，SQL 日志零条（停服务后完整日志核对：4 次请求只有 2 次 miss 出现日志+SQL）。
+3. TTL 辅证：命中不重写缓存，TTL 只自然衰减（1756→1751），不是回到 1800。
+
+**三、删 key 回源（证明 miss 才查库）**
+
+`redis-cli del product::1` → 再请求 → `exists` 回到 1，服务日志再次出现 SQL——miss 时方法体真正执行。
+
+**配置类链路（RedisCacheConfig，启动视角）**
+
+1. `ProductServiceApplication` `@EnableCaching` → 框架开始扫描 @Cacheable 注解（不开启它，注解只是摆设）。
+2. `RedisCacheConfig` 声明 `RedisCacheManager` Bean，覆盖框架默认的缓存管理器 → 默认配置两宗罪：JDK 序列化（redis-cli 全是乱码、实体必须实现 Serializable）+ 永不过期。
+3. `entryTtl(30分钟)` + `disableCachingNullValues()`（L5-4 打开空值缓存）+ JSON 序列化器（Boot 4 用 Jackson 3，选 `GenericJacksonJsonRedisSerializer`，它的 Jackson 2 兄弟版本是老教程里的 `GenericJackson2JsonRedisSerializer`）。
+
+**坑**：① `RedisCacheManager` 的包位置变了——Spring Data Redis 4.x 在 `org.springframework.data.redis.cache`（网上老教程写的 `org.springframework.cache.redis` 在 Spring 7 编译直接报错）；② `GenericJacksonJsonRedisSerializer` 没有无参构造，必须 `create(b -> b.enableDefaultTyping(验证器))` builder 出来；③ 旧 jar 被运行中服务锁定 repackage 失败——先停服务再打包（L4-2 同款坑）。
+
+**验收（实测）**：第 1 次查 MySQL 写 Redis；第 2 次零 SQL、方法体零执行；TTL=1800 存在；删 key 后回源重建。
+
+**下一步**：L5-4 缓存穿透 + 空值缓存（id=999 这类查不到的也缓存，防恶意打库）。
+**当前楼层**：L5-3 完成
+
+### 2026-11-21（L5-1/L5-2 完成：Redis 环境就绪 + mall-product 接入 Spring Data Redis——commit `a98a072`）
 
 改动一句话：mall-product 的 pom 加 `spring-boot-starter-data-redis`，yml 加 `spring.data.redis` 连接配置；**无 Java 代码改动**。Redis 用本机已有 5.0.5（用户指定，免安装）。
 

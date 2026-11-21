@@ -1,6 +1,7 @@
 package com.mall.product.service.impl;
 
 import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.cache.annotation.Cacheable;
 import org.springframework.stereotype.Service;
 
 import com.mall.common.exception.BizException;
@@ -18,6 +19,11 @@ public class ProductServiceImpl implements ProductService {
 	@Autowired
 	private ProductMapper productMapper;
 
+	// @Cacheable（L5）：方法执行前框架先拿 "product::id" 当 key 查 Redis——
+	// 命中就直接把缓存值返回，方法体（包括下面的 Mapper 查库）一行都不执行；
+	// 没命中才真正进方法体查库，返回值会被框架顺手写进 Redis。
+	// cacheNames="product" 是缓存分区名，key="#id" 用方法参数当缓存 key。
+	@Cacheable(cacheNames = "product", key = "#id")
 	@Override
 	public Product getById(Long id) {
 		log.info("查询商品, id={}", id);

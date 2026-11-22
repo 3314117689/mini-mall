@@ -29,6 +29,9 @@ public enum ErrorCode {
     /** 登录失败（L6-3）：用户不存在和密码错误共用一个码，不暴露用户名是否存在 */
     PASSWORD_ERROR(1005, "用户名或密码错误"),
 
+    /** 库存不足（L9-4）：Redis Lua 或数据库条件扣减判断不够 */
+    PRODUCT_STOCK_NOT_ENOUGH(1006, "库存不足"),
+
     /** 没带 token（L6-4）：请求头没有 Authorization: Bearer ... */
     UNAUTHORIZED(4010, "未登录，请先登录"),
 

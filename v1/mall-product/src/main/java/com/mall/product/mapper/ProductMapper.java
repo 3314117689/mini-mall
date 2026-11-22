@@ -4,6 +4,7 @@ import org.apache.ibatis.annotations.Delete;
 import org.apache.ibatis.annotations.Insert;
 import org.apache.ibatis.annotations.Mapper;
 import org.apache.ibatis.annotations.Options;
+import org.apache.ibatis.annotations.Param;
 import org.apache.ibatis.annotations.Select;
 import org.apache.ibatis.annotations.Update;
 
@@ -33,4 +34,15 @@ public interface ProductMapper {
 
     @Delete("delete from product where id = #{id}")
     int deleteById(Long id);
+
+    /**
+     * L9-4：数据库条件扣减。只有 stock >= num 才更新，返回 0 表示没扣成。
+     * 这是防超卖的最后一道防线：即使 Redis 数据不对，也不会扣成负数。
+     */
+    @Update("update product set stock = stock - #{num} where id = #{id} and stock >= #{num}")
+    int deductStock(@Param("id") Long id, @Param("num") Integer num);
+
+    /** L9-4：订单落库失败时回补库存 */
+    @Update("update product set stock = stock + #{num} where id = #{id}")
+    int releaseStock(@Param("id") Long id, @Param("num") Integer num);
 }

@@ -279,10 +279,19 @@
 参考要点：Redis 可能丢数据、被清空、初始值不对，不能当唯一真相。数据库条件更新由行锁保证，是防超卖的最后防线；更新 0 行时会把 Redis 加回去并返回 1006，避免少卖。Redis 不可用时也直接退化为数据库条件扣减，仍然不会超卖。
 
 **9.（★★★）扣了库存但订单落库失败怎么办？补偿失败又怎么办？**
-参考要点：`insert` 包 try-catch，失败后把 `releaseStock` 提交到补偿池回补库存，再返回 5000。补偿池用 `CallerRunsPolicy` 保证任务不丢；如果 product 也挂了导致补偿失败，只能记 error 并人工对账。这是没有分布式事务时的最终兜底，不是强一致。
+参考要点：`insert` 包 try-catch，失败后把补偿任务写进 `stock_compensate_task`，再异步调用 `releaseStock` 回补库存，返回 5000。补偿任务落库后由 `@Scheduled` 每 10 秒扫描，失败按 10s/20s/40s/80s 指数退避重试，最多 5 次，耗尽转 `MANUAL`，留 `POST /order/compensate/replay` 人工重放。补偿能重复执行是因为 product 的 release 按 `orderNo` 幂等（状态 2→4）。这仍然不是强一致，是"不超卖 + 最终回补"。
 
 **10.（★★）你的 L9 验收数据是什么？**
-参考要点：200 并发抢 100 库存 → `ok=100 / 库存不足=100 / 超时=0 / 池满=0`，DB 和 Redis 库存都归零、无负数；108 个非空订单号去重后仍 108 个；`slow-ms=4000` 时 2.03 秒返回 2004 且不落单；小池 1/1/1 五并发出现 3 个 4291；金额溢出触发落库失败后库存从 2 亿回补到 2 亿。**要主动说缺口**：扣减超时会少卖、补偿失败要人工、号段依赖 Redis。
+参考要点：200 并发抢 100 库存 → `ok=100 / 库存不足=100 / 超时=0 / 池满=0`，DB 和 Redis 库存都归零、无负数；108 个非空订单号去重后仍 108 个；`slow-ms=4000` 时 2.03 秒返回 2004 且不落单；小池 1/1/1 五并发出现 3 个 4291；金额溢出触发落库失败后库存从 2 亿回补到 2 亿。补丁后又验证：同一 `orderNo` 重复扣减只扣一次、扣减延迟 4 秒时 order 查状态确认成功继续落单、停 product 后补偿任务转 PENDING 并在恢复后自动 SUCCESS、Redis 端口错配仍能下单。
+
+**11.（★★★）扣减响应超时，怎么判断到底扣没扣？怎么保证不重复扣？**
+参考要点：`orderNo` 在扣减前生成，作为幂等键。product 用 `stock_deduct_log` 记状态机：0 INIT / 1 PROCESSING / 2 SUCCESS / 3 FAILED / 4 RELEASED；`claimProcessing` 只有 INIT 或超过 60 秒的 PROCESSING 能认领，DB 扣减和 `markSuccess(2)` 放在同一个事务里。order 超时后调 `GET /product/stock/deduct/status?orderNo=`：2 就继续落单，3 按失败码返回，-1 说明没扣到，0/1 返回 2040 让调用方稍后查。
+
+**12.（★★★）补偿任务为什么一定要落库？只用内存队列不行吗？**
+参考要点：内存队列在进程重启、线程池拒绝、下游长时间不可用时都会丢任务，只剩日志。落库后定时任务能继续重试，重试耗尽转人工，运维有据可查。任务表用 `order_no` 唯一键做幂等，`select ... where status=0 and next_retry_time<=now()` 扫描，`markXxx` 都带 `status=0` 条件，重复执行只命中一次。
+
+**13.（★★★）Redis 号段挂了怎么继续发号？怎么防止 Redis 丢数据后重号？**
+参考要点：`db_order.id_segment` 存水位。Redis 每次 `INCRBY` 领段后把新水位同步到数据库；Redis 不可用时用 `select ... for update` 锁住水位行，`max_id + step` 领一段，多实例靠行锁串行化。启动时把 Redis 水位对齐到数据库（Redis 低就 SET，Redis 高就回写数据库），所以 Redis 丢数据不会从 0 重发。种子取 `orders`、`stock_deduct_log`、`stock_compensate_task` 三处历史号的最大值，避免和已发出去但没落单的号重复。
 
 ---
 

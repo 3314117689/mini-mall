@@ -29,6 +29,15 @@ public enum ErrorCode {
     /** 登录失败（L6-3）：用户不存在和密码错误共用一个码，不暴露用户名是否存在 */
     PASSWORD_ERROR(1005, "用户名或密码错误"),
 
+    /** 没带 token（L6-4）：请求头没有 Authorization: Bearer ... */
+    UNAUTHORIZED(4010, "未登录，请先登录"),
+
+    /** token 无效（L6-4）：签名不对、已过期、格式错误、kid 找不到公钥 */
+    TOKEN_INVALID(4011, "登录凭证无效或已过期"),
+
+    /** 验签要用的 JWKS 拉不到（L6-4）：认证服务不可用 */
+    AUTH_UNAVAILABLE(4012, "认证服务不可用，请稍后重试"),
+
     /** 用户服务不可用（Sentinel 降级：调用不通时由 fallback 抛出，L4） */
     USER_SERVICE_UNAVAILABLE(2002, "用户服务不可用，请稍后重试"),
 

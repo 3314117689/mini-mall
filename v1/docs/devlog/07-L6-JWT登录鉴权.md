@@ -30,7 +30,7 @@ L0~L5 的 `POST /order/create` 里，`userId` 是客户端自己填的：谁都�
 | L6-1 | 生成 RSA 密钥对；`mall-user` 出 JWKS 端点 | ✅ |
 | L6-2 | 注册走 BCrypt；用户名唯一；存量密码迁移 | ✅ |
 | L6-3 | `role` 列；登录签发 RS256 token | ✅ |
-| L6-4 | `mall-common` 鉴权组件 + order 注册拦截器 | 未开始 |
+| L6-4 | `mall-common` 鉴权组件 + order 注册拦截器 | ✅ |
 | L6-5 | 下单取当前用户；user 鉴权；Feign 透传 token | 未开始 |
 | L6-6 | `@RequireRole` RBAC 演示 | 未开始 |
 | L6-7 | 全链路实测 + 文档收尾 | 未开始 |
@@ -639,3 +639,216 @@ POST /auth/login {"username":"zhangsan","password":"wrong"}
 1. BCrypt 的 `matches` 为什么不需要"解密"？
 2. token 里为什么要放 `role`，而不是每次查库？
 3. 用户改了角色，旧 token 还能通过角色校验吗？为什么？
+
+
+---
+
+## 十二、L6-4 拦截器统一验 token + ThreadLocal 上下文
+
+**命令入场**：`GET http://localhost:8083/order/1`
+请求头：`Authorization: Bearer eyJraWQiOiJtYWxsLWw2LWRldiIsImFsZyI6IlJTMjU2In0...`
+
+**涉及零件（都在 `mall-common/src/main/java/com/mall/common/auth/`）**
+
+| 名字 | 作用 |
+|---|---|
+| `JwtVerifier` | 按 `kid` 从 JWKS 取公钥、验签、把 claims 还原成 `LoginUser` |
+| `JwtInterceptor` | `preHandle` 验 token 并 `UserContext.set`；`afterCompletion` 清 ThreadLocal |
+| `UserContext` | `ThreadLocal<LoginUser>`，请求内任意层可读 |
+| `@CurrentUser` + `CurrentUserArgumentResolver` | Controller 参数直接拿 userId |
+| `JwtWebConfig`（本项目，`mall-order/.../config/`） | 把上面零件装到 order 服务，拦 `/order/**` |
+
+**调用链**
+
+| 顺序 | 谁 | 在哪 | 干了什么 |
+|---|---|---|---|
+| 1 | Tomcat 线程 | — | 请求进 `DispatcherServlet` |
+| 2 | `JwtInterceptor.preHandle` | 第 29-38 行 | 读 `Authorization` 头，抠出 token |
+| 3 | `JwtVerifier.verify` | 第 51-67 行 | 交给 jjwt 解析 |
+| 4 | `JwtVerifier.resolveKey` | 第 69-79 行 | 按 `kid` 查缓存；没有就 `refreshKeys` |
+| 5 | `JwtVerifier.refreshKeys` | 第 82-108 行 | HTTP 拉 `http://localhost:8081/auth/jwks`，n/e 还原公钥 |
+| 6 | jjwt | — | 用公钥验签名、校验 `exp` |
+| 7 | `JwtVerifier.verify` | 第 59-62 行 | claims → `LoginUser` |
+| 8 | `JwtInterceptor.preHandle` | 第 36 行 | `UserContext.set(user)` |
+| 9 | `OrderController.getById` | 第 25-28 行 | 原逻辑不变，正常查库返回 |
+| 10 | `JwtInterceptor.afterCompletion` | 第 40-45 行 | `UserContext.clear()` |
+
+**数据编号**
+
+| 编号 | 数据 | 初始值 | 谁产生 |
+|---|---|---|---|
+| `[D1]` | Authorization 头 | `"Bearer eyJraWQiOi..."` | 客户端 |
+| `[D2]` | token 字符串 | `eyJraWQiOi....eyJzdWIi....签名` | 第 38 行去前缀 |
+| `[D3]` | kid | `"mall-l6-dev"` | jjwt 从 token header 解出 |
+| `[D4]` | 公钥 | `RSAPublicKey` | 第一次请求时从 JWKS 拉取并缓存 |
+| `[D5]` | Claims | `{sub=1, username=zhangsan, role=ADMIN, exp=...}` | jjwt 验签后返回 |
+| `[D6]` | 当前用户 | `LoginUser{userId=1, username=zhangsan, role=ADMIN}` | `JwtVerifier` 组装 |
+| `[D7]` | 响应 | `{"code":0,"data":{"id":1,...}}` | Controller + 框架 |
+
+**四个结局（总览）**
+
+| 结局 | 分岔点 | 条件 | 浏览器 |
+|---|---|---|---|
+| ① 验签通过 | `JwtVerifier.verify` 返回 | 签名对、未过期 | `code=0`（或业务码如 1003） |
+| ② 没带 token | `JwtInterceptor` 第 35 行 | 头为空或不以 `Bearer ` 开头 | `code=4010` |
+| ③ token 无效 | `JwtVerifier.verify` 第 59 行 | 签名错/已过期/`kid` 找不到 | `code=4011` |
+| ④ JWKS 拉不到 | `refreshKeys` 第 104 行 | 用户服务没起、网络不通 | `code=4012` |
+
+### 结局①逐步行进：验签通过
+
+#### 第 1 步｜请求到达拦截器
+
+```java
+// 文件：mall-common/src/main/java/com/mall/common/auth/JwtInterceptor.java
+// 行号：29-38
+@Override
+public boolean preHandle(HttpServletRequest request, HttpServletResponse response, Object handler) {
+    String authorization = request.getHeader("Authorization");
+    if (authorization == null || !authorization.startsWith(BEARER_PREFIX)) {
+        throw new BizException(ErrorCode.UNAUTHORIZED);
+    }
+    String token = authorization.substring(BEARER_PREFIX.length()).trim();
+    UserContext.set(jwtVerifier.verify(token));
+    return true;
+}
+```
+
+- 【你写的】取头 → 判前缀 → 截掉 `"Bearer "` → 验签 → 存上下文。
+- 【框架动作】`HandlerInterceptor`（框架：Spring MVC）在 Controller 方法执行**之前**调用 `preHandle`；返回 `true` 才继续。
+- 【数据】`[D1]` → `[D2]`；此时 `UserContext` 还是空的。
+
+#### 第 2 步｜验签入口
+
+```java
+// 文件：mall-common/src/main/java/com/mall/common/auth/JwtVerifier.java
+// 行号：52-58
+public LoginUser verify(String token) {
+    try {
+        Claims claims = Jwts.parser()
+                .keyLocator(header -> resolveKey(String.valueOf(header.get("kid"))))
+                .build()
+                .parseSignedClaims(token)
+                .getPayload();
+```
+
+- 【你写的】`keyLocator` 是一个回调：jjwt 解析时会先读 header，把 header 交给这个 lambda。
+- 【框架动作】jjwt（框架）拆三段 → 解 header → 调 lambda 要公钥 → 用公钥验第三段签名 → 检查 `exp`。
+- 【数据】`[D3] = "mall-l6-dev"` 从 header 取出，传给 `resolveKey`。
+
+#### 第 3 步｜第一次请求：拉 JWKS
+
+```java
+// 行号：82-100
+private synchronized void refreshKeys() {
+    try {
+        HttpRequest request = HttpRequest.newBuilder(URI.create(jwksUri))
+                .timeout(Duration.ofSeconds(3))
+                .GET()
+                .build();
+        HttpResponse<String> response = httpClient.send(request, HttpResponse.BodyHandlers.ofString());
+        JsonNode keys = objectMapper.readTree(response.body()).path("keys");
+        for (JsonNode jwk : keys) {
+            BigInteger modulus = new BigInteger(1,
+                    Base64.getUrlDecoder().decode(jwk.path("n").asText()));
+            BigInteger exponent = new BigInteger(1,
+                    Base64.getUrlDecoder().decode(jwk.path("e").asText()));
+```
+
+- 【你写的】JDK `HttpClient` 发 GET，Jackson 读 `keys` 数组，`n`/`e` 用 Base64URL 解码后拼公钥。
+- 【框架动作】无（这里全是 JDK + Jackson）。
+- 【数据】JWKS JSON → `[D4] = RSAPublicKey`，以 `kid` 为键放进 `keyCache`。
+- 日志证据：`JWKS 已加载, kid=mall-l6-dev` 只出现**一次**（在第一次带 token 的请求时），后续请求走缓存。
+
+#### 第 4 步｜claims 还原成 `LoginUser`
+
+```java
+// 行号：59-62
+return new LoginUser(
+        Long.valueOf(claims.getSubject()),
+        claims.get("username", String.class),
+        claims.get("role", String.class));
+```
+
+- 【你写的】`sub` 是字符串，必须 `Long.valueOf`；两个自定义 claim 按类型取。
+- 【数据】`[D5]` → `[D6] = LoginUser{userId=1, username="zhangsan", role="ADMIN"}`。
+
+#### 第 5 步｜存上下文
+
+- 【你写的】`UserContext.set([D6])`。
+- 【数据】`ThreadLocal` 里从 `null` 变成 `[D6]`。
+
+#### 第 6 步｜Controller 正常执行
+
+```java
+// 文件：mall-order/src/main/java/com/mall/order/controller/OrderController.java
+// 行号：25-28
+@GetMapping("/{id}")
+public Result<Order> getById(@PathVariable Long id) {
+    return Result.ok(orderService.getById(id));
+}
+```
+
+- 【你写的】L6-4 下这条命令的 Controller 还没用到 `UserContext`（L6-5 才改下单接口），但拦截器已经保证"只有登录用户能进来"。
+- 【数据】`[D7]`；本例库里 id=1 存在，返回 `code=0`。
+
+#### 第 7 步｜请求结束清 ThreadLocal
+
+```java
+// 行号：40-45
+@Override
+public void afterCompletion(HttpServletRequest request, HttpServletResponse response,
+        Object handler, Exception ex) {
+    // 必须清：Tomcat 线程会被复用，不清就会把身份带给下一个请求
+    UserContext.clear();
+}
+```
+
+- 【框架动作】无论 Controller 成功还是抛异常，`afterCompletion` 都会执行。
+- 【数据】`ThreadLocal` 从 `[D6]` → `null`。
+
+### 结局②逐步行进：没带 token
+
+- 【你写的】第 32 行条件成立 → 第 33 行抛 `BizException(UNAUTHORIZED)`。
+- 【数据】`[D2]` 不产生；`UserContext` 全程为空。
+- 【框架动作】异常从 `preHandle` 冒出，被 `GlobalExceptionHandler.handleBizException` 接住。
+- 【数据】响应 `{"code":4010,"data":null,"msg":"未登录，请先登录"}`。
+
+### 结局③逐步行进：token 无效
+
+- 【框架动作】jjwt 验签失败（`SignatureException`）或过期（`ExpiredJwtException`），抛 `JwtException`；`kid` 找不到时 `resolveKey` 抛 `IllegalArgumentException`。
+- 【你写的】第 63 行 `catch (JwtException | IllegalArgumentException e)` → 转成 4011。
+- 【数据】`[D4]`~`[D6]` 不产生；响应 `{"code":4011,"msg":"登录凭证无效或已过期"}`。
+- 实测两种都走到这里：改签名最后 4 位、以及 `abc.def.ghi` 这种乱码。
+
+### 结局④逐步行进：拉不到 JWKS
+
+- 【你写的】`refreshKeys` 里 `httpClient.send` 抛异常（用户服务没起/超时）→ 第 106 行转成 `BizException(AUTH_UNAVAILABLE)`。
+- 【数据】`[D4]` 不产生；响应 `{"code":4012,"msg":"认证服务不可用，请稍后重试"}`。
+- 注意：这个异常**不是** `JwtException`，不会被 `verify` 里的 catch 改写成 4011，所以能区分"凭证错"和"认证服务挂了"。
+
+### L6-4 实测
+
+```text
+GET /order/1（无头）
+→ {"code":4010,"data":null,"msg":"未登录，请先登录"}
+
+GET /order/1（Bearer 有效 token）
+→ {"code":0,"data":{"id":1,"amount":1.00,"num":1,"productId":1,"userId":1},"msg":"ok"}
+
+GET /order/1（签名改 4 位）
+→ {"code":4011,"data":null,"msg":"登录凭证无效或已过期"}
+
+GET /order/1（abc.def.ghi）
+→ {"code":4011,"data":null,"msg":"登录凭证无效或已过期"}
+
+order 日志：
+JWKS 已加载, kid=mall-l6-dev   ← 只有第一次带 token 的请求打印
+```
+
+### L6-4 坑
+
+1. `JwtInterceptor` 不能加 `@Component`：它依赖 `JwtVerifier`，而 `JwtVerifier` 的 `jwks-uri` 各服务不同，交给各服务的 `@Configuration` 组装更清楚；否则 product 这种不用鉴权的服务也会被要求配该属性。
+2. 拦截器里抛出的异常会被 `@RestControllerAdvice` 接住（`DispatcherServlet` 在 `preHandle` 外有统一异常出口），不需要自己 `response.getWriter()`。
+3. `afterCompletion` 必须清 ThreadLocal；Tomcat 默认 200 个线程复用，漏清就是"下一个用户看到上一个用户的身份"。
+4. JWKS 是**懒加载**：服务启动时不拉，第一次验签才拉；所以用户服务重启换了密钥，订单侧要等 `kid` 变了才会重新拉。
+5. 公钥缓存后，用户服务短暂宕机不影响已缓存 `kid` 的验签——这是本地验签的收益，也是"无法即时吊销"的代价。

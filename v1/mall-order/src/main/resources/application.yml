@@ -34,11 +34,6 @@ spring:
       # 热部署开关，生产环境打包时该依赖自动失效
       enabled: true
 
-# JWT 验签（L6-4）：只填公钥端点，不存私钥
-mall:
-  jwt:
-    jwks-uri: http://localhost:8081/auth/jwks
-
 mybatis:
   configuration:
     # 驼峰映射：数据库 create_time 自动映射实体 createTime

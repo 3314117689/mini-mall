@@ -37,8 +37,6 @@ mall:
     public-key: classpath:keys/jwt-public.pem
     # token 有效期（秒）：2 小时。太短用户频繁重登，太长泄露后风险窗口大
     ttl-seconds: 7200
-    # 本服务 /user/** 的拦截器也用它验签（指向自己的 JWKS 端点）
-    jwks-uri: http://localhost:8081/auth/jwks
 
 mybatis:
   configuration:

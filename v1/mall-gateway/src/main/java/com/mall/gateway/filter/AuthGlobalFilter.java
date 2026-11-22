@@ -19,6 +19,7 @@ import org.springframework.web.server.ServerWebExchange;
 
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.mall.common.auth.AuthHeaders;
 import com.mall.common.auth.JwtVerifier;
 import com.mall.common.auth.LoginUser;
 import com.mall.common.exception.BizException;
@@ -43,11 +44,7 @@ public class AuthGlobalFilter implements GlobalFilter, Ordered {
 
     private static final Logger log = LoggerFactory.getLogger(AuthGlobalFilter.class);
 
-    /** 网关传给下游的身份头：下游只认这三个头，不再自己验 token（L7-3 接入） */
-    public static final String HEADER_USER_ID = "X-Mall-User-Id";
-    public static final String HEADER_USERNAME = "X-Mall-Username";
-    public static final String HEADER_ROLE = "X-Mall-Role";
-
+    /** 网关传给下游的身份头：下游只认这三个头，不再自己验 token（L7-3 已接入） */
     private static final String BEARER_PREFIX = "Bearer ";
 
     /** 完全公开的路径：登录、注册、公钥端点 */
@@ -98,12 +95,12 @@ public class AuthGlobalFilter implements GlobalFilter, Ordered {
         ServerHttpRequest mutated = request.mutate()
                 .headers(headers -> {
                     // 先删客户端带来的同名头，再写验签后的真实身份
-                    headers.remove(HEADER_USER_ID);
-                    headers.remove(HEADER_USERNAME);
-                    headers.remove(HEADER_ROLE);
-                    headers.set(HEADER_USER_ID, String.valueOf(user.getUserId()));
-                    headers.set(HEADER_USERNAME, user.getUsername());
-                    headers.set(HEADER_ROLE, user.getRole());
+                    headers.remove(AuthHeaders.USER_ID);
+                    headers.remove(AuthHeaders.USERNAME);
+                    headers.remove(AuthHeaders.ROLE);
+                    headers.set(AuthHeaders.USER_ID, String.valueOf(user.getUserId()));
+                    headers.set(AuthHeaders.USERNAME, user.getUsername());
+                    headers.set(AuthHeaders.ROLE, user.getRole());
                 })
                 .build();
         return chain.filter(exchange.mutate().request(mutated).build());
@@ -128,9 +125,9 @@ public class AuthGlobalFilter implements GlobalFilter, Ordered {
     private ServerWebExchange withoutIdentityHeaders(ServerWebExchange exchange) {
         ServerHttpRequest request = exchange.getRequest().mutate()
                 .headers(headers -> {
-                    headers.remove(HEADER_USER_ID);
-                    headers.remove(HEADER_USERNAME);
-                    headers.remove(HEADER_ROLE);
+                    headers.remove(AuthHeaders.USER_ID);
+                    headers.remove(AuthHeaders.USERNAME);
+                    headers.remove(AuthHeaders.ROLE);
                 })
                 .build();
         return exchange.mutate().request(request).build();

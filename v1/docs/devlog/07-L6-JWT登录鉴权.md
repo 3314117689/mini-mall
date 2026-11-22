@@ -32,7 +32,7 @@ L0~L5 的 `POST /order/create` 里，`userId` 是客户端自己填的：谁都�
 | L6-3 | `role` 列；登录签发 RS256 token | ✅ |
 | L6-4 | `mall-common` 鉴权组件 + order 注册拦截器 | ✅ |
 | L6-5 | 下单取当前用户；user 鉴权；Feign 透传 token | ✅ |
-| L6-6 | `@RequireRole` RBAC 演示 | 未开始 |
+| L6-6 | `@RequireRole` RBAC 演示 | ✅ |
 | L6-7 | 全链路实测 + 文档收尾 | 未开始 |
 
 ## 四、涉及文件与归属（L6-1）
@@ -1033,3 +1033,82 @@ POST /order/create（无头）    → {"code":4010,...}
 3. `UserContext.clear()` 同时清用户和 token；只清一个会留下另一个给下一个请求。
 4. `/order/**` 现在还包含 L0 的 `POST /order`（直接写库、body 带 userId），它是教学遗留接口，生产不应暴露给客户端；真正的业务入口是 `/order/create`。
 5. 订单查询没有校验"这张订单是不是当前用户的"（越权读）；RBAC 只解决角色，不解决数据归属，属于后续可扩展点。
+
+
+---
+
+## 十四、L6-6 `@RequireRole` RBAC
+
+**命令入场**：`DELETE http://localhost:8081/user/8`
+请求头：`Authorization: Bearer <lisi 的 token>`（`role=USER`）
+
+**两个结局（总览）**
+
+| 结局 | 分岔点 | 条件 | 浏览器 |
+|---|---|---|---|
+| ① 角色够 | `JwtInterceptor` 第 43 行 | `role` 在注解允许列表里 | 进入方法，`code=0` |
+| ② 角色不够 | 第 43 行 | `role` 不在列表里 | `code=4030`，方法体不执行 |
+
+### 逐步行进
+
+#### 第 1 步｜方法上声明规则
+
+```java
+// 文件：mall-user/src/main/java/com/mall/user/controller/UserController.java
+// 行号：46-52
+/** 删除用户是管理操作：只有 ADMIN 角色能调（L6-6） */
+@RequireRole("ADMIN")
+@DeleteMapping("/{id}")
+public Result<Void> deleteById(@PathVariable Long id) {
+    userService.deleteById(id);
+    return Result.ok();
+}
+```
+
+- 【你写的】`@RequireRole("ADMIN")` 只是一个标记，不包含任何判断逻辑。
+- 【注解】`@RequireRole`（本项目，`mall-common/auth/RequireRole.java`）声明"允许的角色列表"。
+
+#### 第 2 步｜拦截器读注解
+
+```java
+// 文件：mall-common/src/main/java/com/mall/common/auth/JwtInterceptor.java
+// 行号：38-46
+String token = authorization.substring(BEARER_PREFIX.length()).trim();
+LoginUser user = jwtVerifier.verify(token);
+// 角色校验（L6-6）：方法上标了 @RequireRole 就检查，没标就只验登录
+if (handler instanceof HandlerMethod handlerMethod) {
+    RequireRole requireRole = handlerMethod.getMethodAnnotation(RequireRole.class);
+    if (requireRole != null && !Arrays.asList(requireRole.value()).contains(user.getRole())) {
+        throw new BizException(ErrorCode.FORBIDDEN);
+    }
+}
+```
+
+- 【你写的】先验签拿到 `user`，再看目标方法上有没有 `@RequireRole`，有就比较 `user.getRole()`。
+- 【框架动作】`preHandle` 的第三个参数 `handler`，在匹配到 Controller 方法时类型是 `HandlerMethod`（框架：Spring MVC），能从中反射读出方法注解。
+- 【数据】
+  - lisi 的 token → `LoginUser.role = "USER"`；注解列表 `["ADMIN"]` → 不包含 → 第 44 行抛 4030。
+  - zhangsan 的 token → `role = "ADMIN"` → 包含 → 放行。
+
+#### 第 3 步｜4030 的出路
+
+- 【框架动作】异常从 `preHandle` 冒出，`GlobalExceptionHandler` 接住。
+- 【数据】响应 `{"code":4030,"data":null,"msg":"无权限访问"}`；`UserServiceImpl.deleteById` **压根没执行**，库里的用户还在。
+
+### L6-6 实测
+
+```text
+POST /auth/register {"username":"l6del","password":"123456"} → data=8
+
+DELETE /user/8（lisi，USER）   → {"code":4030,"msg":"无权限访问"}
+GET    /user/8（lisi）         → {"code":0,...}   ← 证明没删掉
+
+DELETE /user/8（zhangsan，ADMIN）→ {"code":0,"msg":"ok"}
+```
+
+### L6-6 坑
+
+1. 角色判断放在 `preHandle`，方法体不会执行——不要在 Service 里再做一次，两处规则容易不一致。
+2. 角色来自 token 快照：把 zhangsan 改成 USER 后，旧 token 在过期前仍能通过 ADMIN 校验；要立刻生效只能重新登录或引入"角色版本号 + 校验"。
+3. 注解可以标在类上；本实现只读方法注解（`getMethodAnnotation`），类级需要额外 `getBeanType().getAnnotation(...)`。
+4. 403 和 401 是两回事：4010/4011 = 没登录/票无效；4030 = 登录了但角色不够。

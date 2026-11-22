@@ -1,5 +1,8 @@
 package com.mall.common.auth;
 
+import java.util.Arrays;
+
+import org.springframework.web.method.HandlerMethod;
 import org.springframework.web.servlet.HandlerInterceptor;
 
 import com.mall.common.exception.BizException;
@@ -33,7 +36,15 @@ public class JwtInterceptor implements HandlerInterceptor {
             throw new BizException(ErrorCode.UNAUTHORIZED);
         }
         String token = authorization.substring(BEARER_PREFIX.length()).trim();
-        UserContext.set(jwtVerifier.verify(token));
+        LoginUser user = jwtVerifier.verify(token);
+        // 角色校验（L6-6）：方法上标了 @RequireRole 就检查，没标就只验登录
+        if (handler instanceof HandlerMethod handlerMethod) {
+            RequireRole requireRole = handlerMethod.getMethodAnnotation(RequireRole.class);
+            if (requireRole != null && !Arrays.asList(requireRole.value()).contains(user.getRole())) {
+                throw new BizException(ErrorCode.FORBIDDEN);
+            }
+        }
+        UserContext.set(user);
         UserContext.setToken(token);
         return true;
     }

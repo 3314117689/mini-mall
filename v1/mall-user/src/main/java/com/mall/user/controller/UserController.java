@@ -10,6 +10,7 @@ import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RestController;
 
+import com.mall.common.auth.RequireRole;
 import com.mall.common.result.Result;
 import com.mall.user.entity.User;
 import com.mall.user.service.UserService;
@@ -42,6 +43,8 @@ public class UserController {
         return Result.ok();
     }
 
+    /** 删除用户是管理操作：只有 ADMIN 角色能调（L6-6） */
+    @RequireRole("ADMIN")
     @DeleteMapping("/{id}")
     public Result<Void> deleteById(@PathVariable Long id) {
         userService.deleteById(id);

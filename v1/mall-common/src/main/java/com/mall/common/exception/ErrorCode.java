@@ -38,6 +38,9 @@ public enum ErrorCode {
     /** 验签要用的 JWKS 拉不到（L6-4）：认证服务不可用 */
     AUTH_UNAVAILABLE(4012, "认证服务不可用，请稍后重试"),
 
+    /** 已登录但角色不够（L6-6 RBAC） */
+    FORBIDDEN(4030, "无权限访问"),
+
     /** 用户服务不可用（Sentinel 降级：调用不通时由 fallback 抛出，L4） */
     USER_SERVICE_UNAVAILABLE(2002, "用户服务不可用，请稍后重试"),
 

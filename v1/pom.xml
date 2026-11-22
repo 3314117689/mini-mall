@@ -30,6 +30,8 @@
     <spring-cloud-alibaba.version>2025.1.0.0</spring-cloud-alibaba.version>
     <!-- JWT 库（L6）：签发端与验签端必须同版本，统一放到父工程仲裁 -->
     <jjwt.version>0.12.5</jjwt.version>
+    <!-- 接口文档（L10）：SpringDoc 3.x 是支持 Boot 4 的版本线，三服务共用同一版本 -->
+    <springdoc.version>3.2.0</springdoc.version>
   </properties>
   <!-- dependencyManagement：只声明版本不真正引入依赖（版本仲裁），
          子模块引用时无需写版本号，保证全工程版本一致 -->
@@ -52,6 +54,12 @@
         <groupId>org.mybatis.spring.boot</groupId>
         <artifactId>mybatis-spring-boot-starter</artifactId>
         <version>${mybatis-spring-boot.version}</version>
+      </dependency>
+      <!-- SpringDoc：Swagger UI + /v3/api-docs，子模块只写 groupId/artifactId -->
+      <dependency>
+        <groupId>org.springdoc</groupId>
+        <artifactId>springdoc-openapi-starter-webmvc-ui</artifactId>
+        <version>${springdoc.version}</version>
       </dependency>
     </dependencies>
   </dependencyManagement>

@@ -1,0 +1,7 @@
+# 生产 profile（--spring.profiles.active=prod）：关闭在线文档，
+# 不对外暴露接口清单与参数结构；开发和测试环境仍用 application.yml 的默认配置。
+springdoc:
+  api-docs:
+    enabled: false
+  swagger-ui:
+    enabled: false

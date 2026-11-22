@@ -29,6 +29,7 @@
 | [09-L7-Gateway网关.md](09-L7-Gateway网关.md) | 路由三要素、lb:// 换实例、StripPrefix、网关验签与限流 |
 | [10-L8-MySQL优化.md](10-L8-MySQL优化.md) | 造数基线、联合索引、EXPLAIN 对比、深翻页、按月分区 |
 | [11-L9-并发与一致性.md](11-L9-并发与一致性.md) | 线程池分级、CompletableFuture 编排、号段发号器、Lua 扣库存 |
+| [12-L10-SpringDoc与参数校验.md](12-L10-SpringDoc与参数校验.md) | SpringDoc 分组与生产开关、Bearer 调试、JSR303 校验与异常收口 |
 
 ## 写作规范（写本目录任何一章都必须遵守）
 

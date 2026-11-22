@@ -44,3 +44,12 @@ mybatis:
     map-underscore-to-camel-case: true
     # 开发期把 SQL 打到控制台，方便看 MyBatis 到底执行了什么
     log-impl: org.apache.ibatis.logging.stdout.StdOutImpl
+
+# L10：接口文档分组。组名=服务名，Swagger UI 右上角下拉可见；
+# paths-to-match 只收本服务的接口，避免把其他路径混进文档。
+springdoc:
+  group-configs:
+    - group: user-service
+      paths-to-match:
+        - /user/**
+        - /auth/**

@@ -26,6 +26,13 @@
             <artifactId>spring-boot-starter-web</artifactId>
             <scope>provided</scope>
         </dependency>
+        <!-- 参数校验异常（L10）：GlobalExceptionHandler 要接 ConstraintViolationException。
+             同样 scope=provided：只参与编译，校验实现由各业务服务的 starter-validation 提供 -->
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-validation</artifactId>
+            <scope>provided</scope>
+        </dependency>
         <!-- JWT 验签（L6-4）：公共鉴权组件的编译依赖。
              各业务服务通过 mall-common 传递拿到这三个包，不用每个服务重复声明 -->
         <dependency>

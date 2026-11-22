@@ -46,6 +46,14 @@ mybatis:
     # 开发期把 SQL 打到控制台，方便看 MyBatis 到底执行了什么
     log-impl: org.apache.ibatis.logging.stdout.StdOutImpl
 
+# L10：接口文档分组。组名=服务名，Swagger UI 右上角下拉可见；
+# paths-to-match 只收本服务的接口，避免把其他路径混进文档。
+springdoc:
+  group-configs:
+    - group: order-service
+      paths-to-match:
+        - /order/**
+
 # L9-1：线程池参数。验收反压时可临时把 remote 的 queue 调成 1，测完改回。
 # 在线池宁可拒绝（4291），补偿池用 CallerRunsPolicy 不丢任务。
 mall:

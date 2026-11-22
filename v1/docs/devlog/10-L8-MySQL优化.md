@@ -35,7 +35,7 @@ L8 不加新框架，只改 **SQL、索引、表结构**，把这三类症状逐
 |---|---|---|
 | L8-0 | 前置体检：编译、中间件、9 行基线 | ✅ |
 | L8-1 | 造 10 万跨月数据 + `/order/page`、`/order/cursor` | ✅ |
-| L8-2 | 联合索引 `(user_id, create_time)`，EXPLAIN 前后对比 | 待做 |
+| L8-2 | 联合索引 `(user_id, create_time)`，EXPLAIN 前后对比 | ✅ |
 | L8-3 | 深翻页三版对比（limit / 延迟关联 / 游标） | 待做 |
 | L8-4 | 按月 RANGE 分区（`orders_p` + rename） | 待做 |
 | L8-5 | 总验收、收尾、提交 | 待做 |
@@ -334,3 +334,164 @@ cursor 第二页：99995 ~ 99984，overlap=0
 1. `page=8000&size=10` 时 `offset` 是多少？为什么没有索引时它和 `page=1` 一样慢？
 2. 为什么 `order by` 要写成 `create_time desc, id desc`，只写 `create_time desc` 会出什么问题？
 3. 游标分页第一页为什么可以直接复用 `selectPage`？第二页的 SQL 为什么能保证不重复？
+
+## 六、L8-2 联合索引消除 filesort
+
+**命令入场**
+
+```sql
+-- 执行库：db_order
+-- 建索引
+alter table orders add index idx_user_create(user_id, create_time);
+
+-- 同一条 SQL，只改 offset
+A. select id, user_id, product_id, num, amount, create_time from orders
+   where user_id = 1 order by create_time desc, id desc limit 0, 10;
+
+B. select id, user_id, product_id, num, amount, create_time from orders
+   where user_id = 1 order by create_time desc, id desc limit 79990, 10;
+```
+
+**本步改动**
+
+| 文件 | 归属 | 作用 |
+|---|---|---|
+| `v1/docs/sql/L8/03-add-index.sql` | 本项目 | 建索引语句 + 回滚语句 |
+| `orders.idx_user_create` | 数据库对象 | `(user_id, create_time)`，等值列在前、排序列在后 |
+
+> Java 代码本步**零改动**。变的只有数据库里多了一棵二级索引树。
+
+**调用链（命令 B）**
+
+- 第 1~4 步同 L8-1 结局②第 1~4 步：网关验签 → `OrderController.page` → `OrderServiceImpl.page` 算出 `offset=79990` → `OrderMapper.selectPage` 发出同一条 SQL。
+- 第 5 步分岔在这里：上次 MySQL 走全表扫 + filesort，这次走 `idx_user_create` 反向扫描。
+
+**数据编号**
+
+| 编号 | 数据 | 初始值 | 谁产生 |
+|---|---|---|---|
+| `[D1]` | 用户 id | `1` | 请求参数 |
+| `[D2]` | offset | `0`（命令 A）/ `79990`（命令 B） | `OrderServiceImpl.page` 第 108 行 |
+| `[D3]` | 索引定义 | `(user_id, create_time)` | DDL |
+| `[D4]` | 执行计划 | `type=ref`、`key=idx_user_create`、`key_len=8`、`rows=49982`、`Extra=Using where` | MySQL 优化器 |
+| `[D5]` | 索引扫描量 | `Handler_read_prev=9`（A）/ `79999`（B） | MySQL |
+| `[D6]` | SQL 耗时 | A 约 `0.0004s`；B 约 `0.57~0.71s` | `SHOW PROFILES` |
+
+**四个结局（总览）**
+
+| 结局 | 分岔点 | 条件 | 结果 |
+|---|---|---|---|
+| ① 浅页命中索引 | MySQL 选索引 | `offset` 小 | 0.0004s 级，filesort 消失 |
+| ② 深页命中索引 | 同上 | `offset=79990` | 反而比全表扫慢 5~7 倍 |
+| ③ 列顺序写反 | 索引定义 | 建成 `(create_time, user_id)` | 无法先按用户定位，排序也用不上（反例推演） |
+| ④ 查询缺最左列 | 条件 | 只写 `where create_time > ?`，不带 `user_id` | 用不上该索引（最左前缀，反例推演） |
+
+### 结局①逐步行进：浅页命中索引
+
+#### 第 1 步｜建索引
+
+- 【你写的】`alter table orders add index idx_user_create(user_id, create_time);`
+- 【框架动作】InnoDB 为 100009 行数据建一棵二级索引树，叶子节点存 `(user_id, create_time, id)`——**二级索引尾部隐含主键**。
+- 【数据】`[D3]`；`show index` 显示两列：`user_id`（cardinality 196）、`create_time`（cardinality 99964）。
+
+#### 第 2 步｜优化器改走索引
+
+```text
+id  select_type  table   partitions  type  possible_keys     key              key_len  ref    rows   filtered  Extra
+1   SIMPLE       orders  NULL        ref   idx_user_create   idx_user_create  8        const  49982  100.00    Using where
+```
+
+- 【框架动作】MySQL 优化器比较"全表扫 + 排序"和"索引范围扫"的代价，选择后者。
+- 【数据】`[D4]`。三个关键变化：
+
+| 列 | 优化前 | 优化后 | 说明 |
+|---|---|---|---|
+| `type` | `ALL` | `ref` | 从全表扫变成按等值条件定位 |
+| `key` | `NULL` | `idx_user_create` | 真正用了哪棵索引 |
+| `Extra` | `Using where; Using filesort` | `Using where` | **filesort 消失** |
+
+- 注意 `rows=49982` 是**估算值**，实际 user 1 有 80005 行；优化器按"总行数 ÷ user_id 去重数"估算，不能当真实扫描行数。
+
+#### 第 3 步｜为什么 filesort 消失
+
+- 【框架动作】索引按 `(user_id, create_time)` 排序存储；`user_id=1` 的所有记录在索引里是连续的一段，段内 `create_time` 天然有序。MySQL 反向扫描这段索引，读出来就是 `create_time desc` 的顺序，不需要再排一次。
+- 【数据】命令 A 的 `Handler_read_prev=9`、`Handler_read_next=0`：从索引尾部往前读了 9 次就凑够 10 行。
+- 补充：`create_time` 相同时还需要 `id desc`，而二级索引叶子尾部正好带主键，所以 `create_time desc, id desc` 仍与索引顺序一致。
+
+#### 第 4 步｜回表取剩余列
+
+- 【框架动作】`select` 要的 `product_id/num/amount` 不在索引里，每返回一行要按主键回表一次。
+- 【数据】命令 A 回表 10 次；因为只取 10 行，代价可以忽略。
+
+#### 第 5 步｜真实耗时
+
+- 【数据】`[D6]`：命令 A 三次 `0.0076s / 0.00038s / 0.00040s`；优化前同一查询是 `0.0748s / 0.0642s / 0.0604s`。
+- 第一次偏慢是索引页还没进缓冲池，第二、三次是稳定值。
+
+### 结局②逐步行进：深页命中索引反而更慢
+
+#### 第 1 步｜offset 仍是 79990
+
+- 【数据】`[D2]=79990`，`[D4]` 与浅页相同，优化器仍选 `idx_user_create`。
+
+#### 第 2 步｜索引要走过 79999 条才够 10 条
+
+- 【框架动作】反向扫描索引，跳过 79990 条，再取 10 条；每取一条还要回表。
+- 【数据】`[D5] = Handler_read_prev=79999`（对比浅页的 9）。
+- 【数据】耗时 `0.57~0.71s`，而无索引全表扫 + filesort 只要 `0.09~0.14s`。
+
+#### 第 3 步｜为什么反而慢了
+
+- 【数据】全表扫是**顺序读** 10 万行，顺序 IO 便宜；索引深翻页是**顺序读 8 万条索引项 + 8 万次随机回表**，随机 IO 贵。
+- 结论：**索引解决的是"过滤 + 排序"，不解决"大偏移"**。大偏移要靠 L8-3 的延迟关联和游标分页。
+- 这条也说明 `EXPLAIN` 里"用上索引"不等于"更快"，要结合 `offset` 和实际耗时判断。
+
+### 结局③逐步行进：列顺序写反（反例推演，不实际执行）
+
+- 【数据】如果把索引建成 `(create_time, user_id)`：树的第一层按时间有序，`where user_id=1` 无法定位连续区间，只能在整棵树里过滤。
+- 【框架动作】优化器大概率放弃该索引，回到全表扫；即使强行用，也拿不到 `user_id` 的等值定位，`filesort` 仍然存在。
+- 规则：**等值条件列放前面，范围/排序列放后面**。
+
+### 结局④逐步行进：查询缺最左列（反例推演）
+
+- 【数据】`select ... where create_time > '2026-01-01' order by create_time`：条件里没有 `user_id`，不满足最左前缀，`idx_user_create` 用不上。
+- 【框架动作】优化器可能走全表扫，或另建 `(create_time)` 索引；这与 L8-4 的分区裁剪是两条不同的优化线。
+
+### L8-2 实测
+
+| 场景 | 优化前 EXPLAIN | 优化后 EXPLAIN | 优化前实际读行 | 优化后实际读行 | 优化前耗时 | 优化后耗时 |
+|---|---|---|---|---|---|---|
+| `limit 0,10` | `ALL / key=NULL / Using filesort` | `ref / idx_user_create / Using where` | `Handler_read_rnd_next=100010` | `Handler_read_prev=9` | 0.0604~0.0748s | 0.0076s → 0.00038~0.00040s |
+| `limit 79990,10` | 同上 | 同上 | `Handler_read_rnd_next=100010` | `Handler_read_prev=79999` | 0.0903~0.1419s | 0.5712~0.7111s |
+
+网关 9000 端到端（curl，间隔 3 秒）：
+
+```text
+优化前：page=1  0.0649 / 0.0808 / 0.1000s   page=8000  0.1124 / 0.1288 / 0.1001s
+优化后：page=1  0.0389 / 0.0316 / 0.0226s   page=8000  0.5479 / 0.6294 / 0.5311s
+```
+
+### L8-2 坑
+
+1. **"用上索引"不等于"更快"**：深翻页时索引扫描 + 随机回表比全表顺序扫还慢，必须结合 offset 看。
+2. **联合索引列顺序不能反**：`(user_id, create_time)` 能同时完成过滤和排序；`(create_time, user_id)` 两件事都做不好。
+3. **最左前缀**：查询条件里必须有 `user_id`，`idx_user_create` 才可能被用上。
+4. **二级索引尾部隐含主键**：所以 `order by create_time desc, id desc` 仍能利用索引顺序，不必再建 `(user_id, create_time, id)`。
+5. **`EXPLAIN.rows` 是估算值**：本例估算 49982，实际 80005；判断真实扫描量要看 `Handler_read_*`。
+6. **MySQL 5.7 没有 invisible index**：想验证"优化前"必须真的 drop 索引（本步已实测 drop → 测 → 重新 add），8.0 才支持 `INVISIBLE`。
+7. **索引有写放大成本**：每次 insert/update 都要维护二级索引；索引不是越多越好，按真实查询建。
+
+### L8-2 断点验证与自测题
+
+| 停在哪 | 看什么 | 看到什么证明走对了 |
+|---|---|---|
+| MySQL：`show index from orders` | `Key_name` | 出现 `idx_user_create`，两列顺序 `user_id`、`create_time` |
+| MySQL：`explain` 命令 A | `type / key / Extra` | `ref` / `idx_user_create` / 不含 `Using filesort` |
+| MySQL：`show session status like 'Handler_read%'` | `Handler_read_prev` | 浅页 9、深页 79999；`Handler_read_rnd_next=0` |
+| Java：`OrderServiceImpl.page` 第 108 行 | `offset` | 仍是 `79990`，说明 Java 层没变，变化全在数据库 |
+
+### 自测题（不附答案）
+
+1. 加了索引后为什么浅页快了、深页反而慢了？分别是什么 IO 模式？
+2. 为什么索引建 `(user_id, create_time)` 就能消掉 `filesort`，而不是必须把 `order by` 的列单独建索引？
+3. `EXPLAIN` 显示 `rows=49982`，但用户 1 实际有 80005 行，怎么解释这个差异？

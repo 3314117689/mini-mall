@@ -83,4 +83,13 @@ public class OrderController {
 			@RequestParam(defaultValue = "10") int size) {
 		return Result.ok(orderService.cursor(userId, lastCreateTime, lastId, size));
 	}
+
+	/**
+	 * L9 补丁2：人工重放库存补偿任务（MANUAL → PENDING 并立即执行一次）。
+	 * POST /order/compensate/replay?orderNo=ORD...
+	 */
+	@PostMapping("/compensate/replay")
+	public Result<Boolean> replayCompensate(@RequestParam String orderNo) {
+		return Result.ok(orderService.replayCompensate(orderNo));
+	}
 }

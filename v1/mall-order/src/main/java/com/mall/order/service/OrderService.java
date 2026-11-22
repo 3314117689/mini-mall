@@ -29,4 +29,7 @@ public interface OrderService {
 
 	/** L8：游标分页，lastCreateTime/lastId 传空表示第一页 */
 	List<Order> cursor(Long userId, LocalDateTime lastCreateTime, Long lastId, int size);
+
+	/** L9 补丁2：人工重放 MANUAL 状态的库存补偿任务，false 表示没有可重放任务 */
+	boolean replayCompensate(String orderNo);
 }

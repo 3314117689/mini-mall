@@ -62,3 +62,13 @@ mall:
         core: 1
         max: 2
         queue: 32
+    # L9 补丁2：库存补偿任务。落库后定时扫描，失败按指数退避重试，次数耗尽转人工。
+    compensate:
+      # 每轮扫描间隔（上一轮跑完后计时），默认 10 秒
+      scan-delay-ms: 10000
+      # 一轮最多处理多少条，避免一次扫太多拖住调度线程
+      batch-size: 20
+      # 最大重试次数，达到后状态置 MANUAL
+      max-retry: 5
+      # 退避基数：10s、20s、40s、80s
+      backoff-base-ms: 10000

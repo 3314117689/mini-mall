@@ -30,6 +30,7 @@ import com.mall.order.id.SegmentIdGenerator;
 import com.mall.order.mapper.OrderMapper;
 import com.mall.order.remote.RemoteService;
 import com.mall.order.service.OrderService;
+import com.mall.order.service.StockCompensateService;
 
 import lombok.extern.slf4j.Slf4j;
 
@@ -59,10 +60,9 @@ public class OrderServiceImpl implements OrderService {
 	@Autowired
 	private SegmentIdGenerator segmentIdGenerator;
 
-	/** L9-5：补偿池，CallerRunsPolicy，库存回补任务不能丢 */
+	/** L9 补丁2：补偿任务落库 + 定时重试，取代原来只在内存里跑一次的补偿 */
 	@Autowired
-	@Qualifier(ThreadPoolConfig.COMPENSATE_EXECUTOR)
-	private ThreadPoolTaskExecutor compensateExecutor;
+	private StockCompensateService compensateService;
 
 	@Override
 	public Order getById(Long id) {
@@ -155,7 +155,7 @@ public class OrderServiceImpl implements OrderService {
 			log.info("库存扣减成功, orderNo={}, productId={}, num={}, remaining={}",
 					orderNo, snapshot.product().getId(), dto.getNum(), remaining);
 		} catch (BizException e) {
-			remaining = resolveDeductAfterFailure(orderNo, e);
+			remaining = resolveDeductAfterFailure(orderNo, snapshot.product().getId(), dto.getNum(), e);
 		}
 
 		Order order = new Order();
@@ -168,10 +168,10 @@ public class OrderServiceImpl implements OrderService {
 			order.setAmount(snapshot.product().getPrice().multiply(BigDecimal.valueOf(dto.getNum())));
 			orderMapper.insert(order);
 		} catch (RuntimeException e) {
-			// 库存已经扣了但订单没落成：必须回补，走补偿池，不能丢
+			// 库存已经扣了但订单没落成：必须回补，落补偿任务，不能丢
 			log.error("订单落库失败，开始回补库存, orderNo={}, productId={}, num={}",
 					orderNo, snapshot.product().getId(), dto.getNum(), e);
-			compensateStock(orderNo, snapshot.product().getId(), dto.getNum());
+			compensateService.submit(orderNo, snapshot.product().getId(), dto.getNum());
 			throw new BizException(ErrorCode.SYSTEM_ERROR);
 		}
 
@@ -224,9 +224,9 @@ public class OrderServiceImpl implements OrderService {
 	 * - 成功：product 实际已扣，继续落单；
 	 * - 明确不存在：安全失败，按原错误返回；
 	 * - 失败：按 product 记录的失败码返回；
-	 * - 处理中/状态也查不到：返回 2040，让调用方用订单号后续查询。
+	 * - 处理中/状态也查不到：落一条补偿任务兜底，再返回 2040。
 	 */
-	private Integer resolveDeductAfterFailure(String orderNo, BizException e) {
+	private Integer resolveDeductAfterFailure(String orderNo, Long productId, Integer num, BizException e) {
 		int code = e.getCode();
 		if (code != ErrorCode.PRODUCT_SERVICE_UNAVAILABLE.getCode()
 				&& code != ErrorCode.REMOTE_TIMEOUT.getCode()) {
@@ -238,6 +238,8 @@ public class OrderServiceImpl implements OrderService {
 			status = remoteService.deductStatus(orderNo);
 		} catch (BizException statusError) {
 			log.warn("扣减失败且状态查询失败, orderNo={}, 扣减码={}", orderNo, code, statusError);
+			// 到底扣没扣不知道：落补偿任务，product 恢复后 release 一次（没扣就是空操作）
+			compensateService.submit(orderNo, productId, num);
 			throw new BizException(ErrorCode.DEDUCT_PROCESSING.getCode(),
 					ErrorCode.DEDUCT_PROCESSING.getMsg() + "，订单号：" + orderNo);
 		}
@@ -256,21 +258,15 @@ public class OrderServiceImpl implements OrderService {
 					? ErrorCode.SYSTEM_ERROR.getMsg() : status.getErrorMsg();
 			throw new BizException(errorCode, errorMsg);
 		}
+		// 还在处理中：订单这次不落，但库存可能最终会扣成功，交给补偿任务收口
+		compensateService.submit(orderNo, productId, num);
 		throw new BizException(ErrorCode.DEDUCT_PROCESSING.getCode(),
 				ErrorCode.DEDUCT_PROCESSING.getMsg() + "，订单号：" + orderNo);
 	}
 
-	/** 补偿必须走独立池：在线池宁可拒绝，补偿池用 CallerRunsPolicy 保证执行 */
-	private void compensateStock(String orderNo, Long productId, Integer num) {
-		compensateExecutor.execute(() -> {
-			try {
-				remoteService.releaseStock(orderNo, productId, num);
-				log.info("库存补偿成功, orderNo={}, productId={}, num={}", orderNo, productId, num);
-			} catch (Exception e) {
-				log.error("库存补偿失败，需要人工对账, orderNo={}, productId={}, num={}",
-						orderNo, productId, num, e);
-			}
-		});
+	@Override
+	public boolean replayCompensate(String orderNo) {
+		return compensateService.replay(orderNo);
 	}
 
 	/** 分页参数统一校验，page 从 1 开始 */

@@ -53,6 +53,12 @@
             <artifactId>spring-cloud-starter-loadbalancer</artifactId>
         </dependency>
 
+        <!-- Redis：号段发号器（L9-3）用 INCRBY 取号段；同时给后续扣库存留连接能力 -->
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-data-redis</artifactId>
+        </dependency>
+
         <!-- MyBatis：数据库访问（版本由父工程仲裁，此处不写） -->
         <dependency>
             <groupId>org.mybatis.spring.boot</groupId>

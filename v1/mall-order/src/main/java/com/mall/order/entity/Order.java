@@ -15,6 +15,9 @@ import lombok.Data;
 public class Order {
 	private Long id;
 
+	/** L9-3：业务订单号，由号段发号器生成，与数据库自增 id 分离 */
+	private String orderNo;
+
 	private Long userId;
 
 	private Long productId;

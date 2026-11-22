@@ -24,6 +24,11 @@ spring:
           default:
             connect-timeout: 3000
             read-timeout: 3000
+  data:
+    redis:
+      # 号段发号器（L9-3）与商品缓存共用本机 Redis
+      host: 127.0.0.1
+      port: 6379
   datasource:
     driver-class-name: com.mysql.cj.jdbc.Driver
     url: jdbc:mysql://localhost:3306/db_order?useUnicode=true&characterEncoding=utf8&serverTimezone=Asia/Shanghai&useSSL=false&allowPublicKeyRetrieval=true
@@ -45,6 +50,9 @@ mybatis:
 # 在线池宁可拒绝（4291），补偿池用 CallerRunsPolicy 不丢任务。
 mall:
   order:
+    # 号段大小：一次从 Redis 领 step 个号，本地慢慢发；验收时可调成 3 观察换段
+    segment:
+      step: 1000
     pool:
       remote:
         core: 8

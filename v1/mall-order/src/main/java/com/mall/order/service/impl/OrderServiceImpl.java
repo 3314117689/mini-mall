@@ -25,6 +25,7 @@ import com.mall.order.dto.OrderCreateDTO;
 import com.mall.order.dto.ProductDTO;
 import com.mall.order.dto.UserDTO;
 import com.mall.order.entity.Order;
+import com.mall.order.id.SegmentIdGenerator;
 import com.mall.order.mapper.OrderMapper;
 import com.mall.order.remote.RemoteService;
 import com.mall.order.service.OrderService;
@@ -52,6 +53,10 @@ public class OrderServiceImpl implements OrderService {
 	@Autowired
 	@Qualifier(ThreadPoolConfig.REMOTE_EXECUTOR)
 	private ThreadPoolTaskExecutor remoteExecutor;
+
+	/** L9-3：号段发号器，订单号不再用数据库自增 id 对外暴露 */
+	@Autowired
+	private SegmentIdGenerator segmentIdGenerator;
 
 	@Override
 	public Order getById(Long id) {
@@ -136,6 +141,7 @@ public class OrderServiceImpl implements OrderService {
 		}
 
 		Order order = new Order();
+		order.setOrderNo(segmentIdGenerator.nextOrderNo());
 		order.setUserId(snapshot.user().getId());
 		order.setProductId(snapshot.product().getId());
 		order.setNum(dto.getNum());
@@ -143,7 +149,8 @@ public class OrderServiceImpl implements OrderService {
 		order.setAmount(snapshot.product().getPrice().multiply(BigDecimal.valueOf(dto.getNum())));
 		orderMapper.insert(order);
 
-		log.info("下单成功, orderId={}, amount={}", order.getId(), order.getAmount());
+		log.info("下单成功, orderId={}, orderNo={}, amount={}",
+				order.getId(), order.getOrderNo(), order.getAmount());
 		return order.getId();
 	}
 

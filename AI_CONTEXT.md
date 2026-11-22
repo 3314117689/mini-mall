@@ -209,7 +209,7 @@
 ### 3.5 后续楼层（待通关后沉淀）
 
 - L5 Redis 缓存模板：尚未沉淀
-- L7-L10：通关后逐层追加
+- L8-L10：通关后逐层追加
 
 ### 3.6 JWT 登录鉴权（L6）
 
@@ -222,7 +222,7 @@
 5. **验签器**：`Jwts.parser().keyLocator(h -> resolveKey(h.get("kid"))).build().parseSignedClaims(token).getPayload()`；公钥按 kid 缓存，首次懒加载 JWKS。
 6. **拦截器**：`preHandle` 读 `Authorization: Bearer` → 验签 → 角色校验 → `UserContext.set(user/token)`；`afterCompletion` 必须 `clear()`。
 7. **接口取用户**：`@CurrentUser Long userId` + `HandlerMethodArgumentResolver` 从 ThreadLocal 取，Controller 不解析 token。
-8. **服务间透传**：Feign `RequestInterceptor` 从 `UserContext.getToken()` 取票加到下游请求头；异步线程会丢 ThreadLocal。
+8. **服务间透传**：L6 是 Feign `RequestInterceptor` 透传原始 token；L7 起改为透传网关注入的三个身份头 `X-Mall-*`，下游不再验 token。异步线程会丢 ThreadLocal。
 
 **口诀**：
 > 私钥签、公钥验，kid 指路 JWKS；
@@ -231,6 +231,26 @@
 > 调下游带同一张票，角色注解管权限。
 
 **自测三问**：RS256 与 HS256 的本质区别？（非对称 vs 共享密钥）/ ThreadLocal 为什么必须 clear？（Tomcat 线程复用串号）/ token 为什么无法即时吊销？（无状态，服务端不存）
+
+### 3.7 网关（L7）
+
+**默写顺序**：模块（不能引 web）→ 路由 → 验签过滤器 → 服务信任头 → Feign 透传 → 限流 → 错误/CORS
+
+1. **模块**：`spring-cloud-starter-gateway-server-webflux` + nacos-discovery + loadbalancer；**绝不能引 `starter-web`**（WebMVC 与 WebFlux 冲突）。
+2. **路由**：`id / uri / predicates / filters`；`lb://服务名` 由 LoadBalancer 从 Nacos 取实例；`StripPrefix=1` 去掉对外的 `/api` 第一段。
+3. **验签过滤器**：`GlobalFilter + Ordered(-100)`；白名单 = 登录/注册/JWKS + 商品 GET/HEAD + OPTIONS；验签后**先 remove 再 set** 三个 `X-Mall-*` 头。
+4. **服务信任头**：`GatewayAuthInterceptor` 只读头重建 `LoginUser`；`@RequireRole` 仍留服务端；Feign `RequestInterceptor` 透传三个头（服务间直连不经网关）。
+5. **限流**：reactive Redis + `KeyResolver`（userId 优先、IP 兜底）+ `RequestRateLimiter`（replenishRate/burstCapacity/requestedTokens）；拒绝时空 429 用响应装饰器改成 `4290`。
+6. **统一错误**：`ErrorWebExceptionHandler @Order(-2)` 接 404(4040)/503(5030)；**404 发生在过滤器之前**，GlobalFilter 接不到。
+7. **CORS**：`globalcors`；`allowedOriginPatterns: "*"`，不能 `allowedOrigins: "*"` + `allowCredentials: true`。
+
+**口诀**：
+> 网关不引 web，路由三件套；
+> 先验票再写头，下游只认头；
+> 限流 Redis 桶，429 改 4290；
+> 404 走异常口，跨域网关收。
+
+**自测三问**：为什么不能引 `starter-web`？（两套容器冲突）/ 下游为什么还保留 `@RequireRole`？（网关看不到方法注解）/ 为什么 404 不能用 `GlobalFilter` 接？（路由没匹配时过滤器链还没开始）
 
 > 当前进度、遗留清单、下一步计划 → 一律看 `DEV_LOG.md`，本文档不记进度。
 

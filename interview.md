@@ -183,7 +183,7 @@
 参考要点：防用户名枚举。如果"用户不存在"单独返回 1001，攻击者可以批量试用户名，先摸清哪些账号存在，再做定向撞库。统一返回"用户名或密码错误"，让两种失败对外不可区分。
 
 **6.（★★★）微服务之间怎么传递用户身份？异步调用会有什么问题？**
-参考要点：用户身份在 `UserContext`（ThreadLocal）里，order 调 user 时由 Feign 的 `RequestInterceptor` 从上下文取原始 token，加到下游请求的 `Authorization` 头，下游自己的拦截器再验一遍。ThreadLocal 只在当前线程有效：Feign 默认同步调用没问题，一旦换成线程池/`@Async`/`CompletableFuture`，子线程读不到，需要显式传递或做上下文装饰。
+参考要点：用户身份在 `UserContext`（ThreadLocal）里。L6 是 Feign 的 `RequestInterceptor` 把原始 token 加到下游 `Authorization` 头，下游再验一遍；L7 接入网关后改为透传网关注入的 `X-Mall-User-Id/Username/Role`，下游不再验 token，只校验角色。ThreadLocal 只在当前线程有效：Feign 默认同步调用没问题，一旦换成线程池/`@Async`/`CompletableFuture`，子线程读不到，需要显式传递或做上下文装饰。
 
 **7.（★★）JWT 是无状态的，那"退出登录"和"token 被盗"怎么处理？**
 参考要点：服务端不存 session，签发出去的 token 在 `exp` 前始终有效，无法单个作废。常见方案：① 缩短 TTL + refresh token；② Redis 黑名单存 jti，验签时多查一次；③ 改密码/角色时给用户一个 `tokenVersion`，token 里带上旧版本就失效。本项目从简，只靠短 TTL。
@@ -196,6 +196,34 @@
 
 ---
 
+## L7 Gateway 网关
+
+**1.（★★★）为什么要加网关？它和 Nginx 有什么区别？**
+参考要点：网关把"前端要记 N 个端口、每个服务各写一遍鉴权/限流/跨域"收口成一个入口（9000），按路径路由到不同服务，鉴权、限流、CORS 只做一次。Nginx 偏流量入口和静态资源，规则偏运维、改配置要 reload；Spring Cloud Gateway 是应用内网关，能写 Java 过滤器、集成注册中心和业务鉴权，适合做业务级统一入口。生产常见是 Nginx 在最外层，Gateway 在内层。
+
+**2.（★★★）Gateway 为什么用 WebFlux？误引 `spring-boot-starter-web` 会怎样？**
+参考要点：Gateway 基于响应式（Netty）实现，少量线程扛高并发 IO，不能阻塞。`spring-boot-starter-web` 会引入 Servlet/Tomcat 和 WebMVC，与 WebFlux 两套容器冲突，启动失败或行为异常。所以网关模块只能用 `spring-cloud-starter-gateway-server-webflux`，业务服务的 MVC 代码（拦截器、`@RestControllerAdvice`）也不能直接复用。
+
+**3.（★★）路由三要素是什么？`lb://` 和 `StripPrefix` 各解决什么问题？**
+参考要点：`id`（路由名）、`uri`（目标地址）、`predicates`（匹配条件，如 `Path=/api/product/**`）。`lb://product-service` 表示不写死 IP，由 LoadBalancer 从 Nacos 取实例并负载均衡；`StripPrefix=1` 去掉对外多出来的 `/api` 第一段，让下游 Controller 路径保持不变。
+
+**4.（★★★）网关鉴权的完整链路？为什么角色校验还留在服务里？**
+参考要点：`AuthGlobalFilter`（order -100）先判白名单（登录/注册/JWKS、商品 GET/HEAD、OPTIONS）→ 读 `Authorization: Bearer` → `JwtVerifier` 按 kid 取公钥验签 → **先删客户端伪造的 `X-Mall-*` 头，再写入验签后的三个身份头** → 放行。服务端 `GatewayAuthInterceptor` 只读三个头重建 `LoginUser`，再做 `@RequireRole` 校验。角色校验不能上移：网关只看 URL，看不到 Controller 方法上的注解。
+
+**5.（★★★）下游无条件信任 `X-Mall-User-*` 有什么风险？生产怎么防？**
+参考要点：任何人只要能直连服务端口，就能自己伪造这三个头冒充任意用户，网关验签完全绕开。生产做法：① 服务只开内网，安全组/NACL 只允许网关访问；② 网关额外加服务间共享密钥头，服务先校验密钥再信任身份头；③ 服务间 mTLS。本地项目接受该风险，但面试要能说清边界在哪。
+
+**6.（★★）网关限流怎么实现？`KeyResolver` 和令牌桶参数分别是什么含义？**
+参考要点：`RequestRateLimiter` + reactive Redis，`RedisRateLimiter` 用 Lua 在 Redis 里维护令牌桶。`KeyResolver` 决定"账记在谁头上"：本项目优先 `user:<id>`，未登录用 `ip:<地址>`。`replenishRate` 每秒补多少令牌，`burstCapacity` 桶最多攒多少（瞬间并发上限），`requestedTokens` 每请求消耗多少。按路由分桶，product 和 order 的额度互不影响。
+
+**7.（★★）限流器拒绝时只返回空 429，怎么变成统一的 `code=4290`？**
+参考要点：`RequestRateLimiter` 拒绝时设 429 后直接 `setComplete()`，不写响应体。`RateLimitResponseFilter`（order -90）用 `ServerHttpResponseDecorator` 包住响应，在 `setComplete()` 被调用时检查状态 429，改成 200 并写入 `Result` JSON。必须在响应提交前拦截，提交后再写会报错。
+
+**8.（★★）网关的 404 和 503 怎么统一成业务格式？为什么不能用 `GlobalFilter`？**
+参考要点：自己实现 `ErrorWebExceptionHandler`（`@Order(-2)`，早于 Boot 默认的 -1），把 `ResponseStatusException` 404 映射成 `4040`、`NotFoundException` 503 映射成 `5030`，写成 `Result` JSON。404 发生在"路由还没匹配"的阶段，`GlobalFilter` 属于路由过滤器链，根本不会执行，所以只能在异常出口接。
+
+---
+
 ## 待补楼层
 
-- L7 及以后：逐层追加
+- L8 及以后：逐层追加

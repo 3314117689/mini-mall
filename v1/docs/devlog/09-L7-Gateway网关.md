@@ -1,6 +1,6 @@
 # 09 L7 Gateway 网关
 
-> 按铁律 11 写：总览表只做导航，真正的过程在"逐步行进"里。本章随 L7-1~L7-5 逐步补全。
+> 按铁律 11 写：总览表只做导航，真正的过程在"逐步行进"里。L7-1~L7-5 已全部补全。
 > 本章的一条轴：**前端只打 9000 → 网关按 `/api` 前缀选路由 → 去掉 `/api` → 转发到服务实例**。
 
 ## 一、这一层解决什么
@@ -39,7 +39,7 @@ L7 增加一个网关（`9000`）：
 | L7-2 | `AuthGlobalFilter`：白名单 + 验签 + 注入身份头 | ✅ |
 | L7-3 | 服务改信任网关头，Feign 透传身份 | ✅ |
 | L7-4 | 网关限流 `RequestRateLimiter` | ✅ |
-| L7-5 | CORS、错误统一、全链路验收、收尾 | 未开始 |
+| L7-5 | CORS、错误统一、全链路验收、收尾 | ✅ |
 
 ## 四、涉及文件与归属（L7-1）
 
@@ -915,3 +915,138 @@ ServerHttpResponseDecorator decorated = new ServerHttpResponseDecorator(exchange
 1. `replenishRate=2`、`burstCapacity=5` 分别限制了什么？为什么连续 10 次请求可能通过 6 次而不是 5 次？
 2. 为什么限流的 Key 要优先用 userId，而不是全部按 IP？
 3. `RequestRateLimiter` 拒绝时已经调用了 `setComplete()`，为什么还能把响应体改成 `code=4290`？
+
+---
+
+## 十三、L7-5 全局 CORS、统一错误与整体验收
+
+**命令入场**
+
+```text
+A. OPTIONS http://localhost:9000/api/product/1
+   Origin: http://localhost:3000
+   Access-Control-Request-Method: GET
+   Access-Control-Request-Headers: Authorization
+
+B. GET http://localhost:9000/nope
+
+C. GET http://localhost:9000/api/product/1     （product 服务未启动）
+```
+
+**本步改动**
+
+| 文件 | 归属 | 作用 |
+|---|---|---|
+| `application.yml` 第 22-33 行 | 本项目 | 网关全局 CORS |
+| `GatewayErrorHandler` | 本项目，`mall-gateway/.../handler/` | 接管 WebFlux 异常出口，统一 404/503 响应 |
+| `ErrorCode` | 本项目，`mall-common/.../exception/` | 新增 `NOT_FOUND(4040)`、`SERVICE_UNAVAILABLE(5030)` |
+| `ErrorWebExceptionHandler` | 框架：Spring Boot 4（`org.springframework.boot.webflux.error`） | WebFlux 的异常处理接口 |
+
+**四个结局（总览）**
+
+| 结局 | 入口 | 条件 | 浏览器 |
+|---|---|---|---|
+| ① 预检通过 | `OPTIONS /api/product/1` | 带 `Origin` 和 `Access-Control-Request-*` | 200 + CORS 响应头 |
+| ② 没有路由 | `GET /nope` | 三条路由的 Path 都不匹配 | `{"code":4040}` |
+| ③ 没有实例 | `GET /api/product/1` | 路由匹配，但 Nacos 里没有 product 实例 | `{"code":5030}` |
+| ④ 其他异常 | 任意 | 不是 404/503 的异常 | `{"code":5000}` |
+
+### 结局①逐步行进：CORS 预检
+
+#### 第 1 步｜鉴权过滤器放行 OPTIONS
+
+- 【你写的】`AuthGlobalFilter.isPublic` 第 114-116 行：`HttpMethod.OPTIONS` 直接返回 `true`。
+- 【数据】预检请求不带 token，也不会被 4010 拦住。
+
+#### 第 2 步｜网关加跨域响应头
+
+- 【你写的】`application.yml` 第 22-33 行声明 `globalcors`。
+- 【框架动作】Gateway 的 CORS 处理器在路由之前处理预检，返回：
+  - `Access-Control-Allow-Origin: http://localhost:3000`
+  - `Access-Control-Allow-Methods: GET`
+  - `Access-Control-Allow-Headers: Authorization`
+  - `Access-Control-Allow-Credentials: true`
+  - `Access-Control-Max-Age: 3600`
+- 【数据】浏览器看到这些头，才允许真正的跨域请求发出。
+- `add-to-simple-url-handler-mapping: true` 的作用：即使路径没匹配到路由，OPTIONS 也交给 CORS 处理器，而不是直接 404。
+
+### 结局②逐步行进：没有路由 → 4040
+
+- 【框架动作】`RoutePredicateHandlerMapping` 找不到任何路由，抛 `ResponseStatusException(404)`。
+- 注意：此时 **GlobalFilter 还没开始执行**，所以不能用普通过滤器接这个异常。
+- 【你写的】`GatewayErrorHandler` 通过 `@Order(-2)` 排在 Boot 默认错误处理器（-1）之前，接住异常：
+
+```java
+// 文件：mall-gateway/src/main/java/com/mall/gateway/handler/GatewayErrorHandler.java
+// 行号：39-59
+public Mono<Void> handle(ServerWebExchange exchange, Throwable ex) {
+    if (exchange.getResponse().isCommitted()) {
+        return Mono.error(ex);
+    }
+    ErrorCode errorCode = resolve(ex);
+    ...
+    response.setStatusCode(HttpStatus.OK);
+    response.getHeaders().setContentType(MediaType.APPLICATION_JSON);
+    ...
+    byte[] bytes = objectMapper.writeValueAsBytes(Result.fail(errorCode));
+    return response.writeWith(Mono.just(response.bufferFactory().wrap(bytes)));
+}
+```
+
+- 【数据】`resolve` 看到状态 404 → `ErrorCode.NOT_FOUND` → 响应 `{"code":4040,"msg":"接口不存在","data":null}`，HTTP 200。
+
+### 结局③逐步行进：没有实例 → 5030
+
+- 【框架动作】路由匹配成功，`ReactiveLoadBalancerClientFilter` 在 Nacos 里查不到 `product-service`，抛 Gateway 的 `NotFoundException`（状态 503）。
+- 【你写的】`resolve` 第 61-72 行判断状态码 503 → `ErrorCode.SERVICE_UNAVAILABLE`。
+- 【数据】响应 `{"code":5030,"msg":"服务不可用，请稍后重试","data":null}`，HTTP 200。
+
+### 结局④逐步行进：其他异常 → 5000
+
+- 【你写的】既不是 404 也不是 503 的异常，统一落到 `ErrorCode.SYSTEM_ERROR`（5000）。
+- 日志会打 `网关异常, path=..., code=5000, ex=...`，便于排查。
+- 注意：实例还在、但连接被拒绝（比如服务刚被杀、Nacos 还没剔除）时，可能落到 5000 而不是 5030；这是注册中心心跳延迟导致的，不是代码错。
+
+### L7 整体验收
+
+| # | 请求 | 预期 | 实测 |
+|---|---|---|---|
+| 1 | `POST /api/auth/login` | `code=0` | ✅ zhangsan / lisi 都拿到 token |
+| 2 | `GET /api/product/1`（无 token） | `code=0` | ✅ 公开读 |
+| 3 | `POST /api/product`（无 token） | `4010` | ✅ |
+| 4 | `GET /api/order/1`（无 token） | `4010` | ✅ |
+| 5 | `GET /api/order/1`（乱 token） | `4011` | ✅ |
+| 6 | `GET /api/order/1`（有效 token） | `code=0` | ✅ |
+| 7 | `GET /api/user/2`（lisi token） | `code=0`，`lisi/USER` | ✅ |
+| 8 | `DELETE /api/user/999`（lisi） | `4030` | ✅ RBAC 仍生效 |
+| 9 | 下单 + 伪造 `X-Mall-User-Id: 1` | `code=0`，`userId=2` | ✅ 网关覆盖伪造头 |
+| 10 | 连续 10 次 `GET /api/product/1` | 部分 `4290` | ✅ 5 成功 / 5 限流 |
+| 11 | `GET /nope` | `4040` | ✅ |
+| 12 | product 未启动时 `GET /api/product/1` | `5030` | ✅ |
+| 13 | CORS 预检 | 返回 5 个 `Access-Control-*` 头 | ✅ |
+
+### L7-5 坑
+
+1. **Boot 4 的包名变了**：`ErrorWebExceptionHandler` 在 `org.springframework.boot.webflux.error`，不是老的 `org.springframework.boot.web.reactive.error`；照旧教程写会编译报"找不到符号"。
+2. **`@Order(-2)` 必须比默认处理器更早**：Boot 默认错误处理器是 -1，写成 -1 或更大不会生效。
+3. **404 不能用 GlobalFilter 接**：路由没匹配时过滤器链还没开始，必须在 `ErrorWebExceptionHandler` 这一层接。
+4. **CORS 前缀在 5.x 变了**：`spring.cloud.gateway.server.webflux.globalcors`，旧前缀不生效。
+5. **`allowedOrigins: "*"` 与 `allowCredentials: true` 冲突**：浏览器会拒绝；用 `allowedOriginPatterns: "*"`（本项目）或写死具体域名。
+6. **404/503 也返回 HTTP 200**：这是沿用"前端只看 body.code"的约定，代价是监控/健康检查必须解析 body；如果想保留语义，把 `response.setStatusCode(HttpStatus.OK)` 删掉即可。
+7. **网关 4040 与业务 1002 不是一回事**：`4040` 是"网关找不到路由"；商品不存在是业务码 `1002`，两者排查方向不同。
+8. **预检不带 token**：`AuthGlobalFilter` 必须放行 OPTIONS，否则 CORS 配了也会被 4010 挡掉。
+
+### L7-5 断点验证与自测题
+
+| 停在哪 | 看什么 | 看到什么证明走对了 |
+|---|---|---|
+| `GatewayErrorHandler.handle` 第 46 行 | `ex` 的类型和状态码 | `/nope` 是 `ResponseStatusException` 404；无实例是 `NotFoundException` 503 |
+| 第 52 行 | `response.getStatusCode()` | 被改成 `200 OK` |
+| 第 55 行 | `bytes` 转字符串 | 与浏览器收到的 `{"code":4040,...}` 一致 |
+| 浏览器 Network / curl -i | 预检响应头 | 5 个 `Access-Control-*` 头齐全 |
+
+### 自测题（不附答案）
+
+1. 为什么"找不到路由"的 404 不能用 `GlobalFilter` 处理，而要用 `ErrorWebExceptionHandler`？
+2. `allowedOrigins: "*"` 加 `allowCredentials: true` 为什么会失效？本项目怎么改的？
+3. 网关把 404/503 也包装成 HTTP 200，有什么好处和代价？

@@ -19,6 +19,18 @@ spring:
     gateway:
       server:
         webflux:
+          # 全局跨域（L7-5）：前端只打 9000，跨域响应头由网关统一加
+          globalcors:
+            # 预检请求 OPTIONS 即使没匹配到路由也交给 CORS 处理器
+            add-to-simple-url-handler-mapping: true
+            cors-configurations:
+              '[/**]':
+                # 本地学习放开所有来源；生产改成具体前端域名
+                allowedOriginPatterns: "*"
+                allowedMethods: "*"
+                allowedHeaders: "*"
+                allowCredentials: true
+                maxAge: 3600
           # 路由三要素：id（路由名）、uri（转发目标）、predicates（什么请求走这条路由）
           # lb://服务名：交给 LoadBalancer 从 Nacos 取实例地址，不写死 IP
           # StripPrefix=1：去掉路径第一段 /api，再转发给下游

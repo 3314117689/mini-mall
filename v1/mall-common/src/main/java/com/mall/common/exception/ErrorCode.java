@@ -41,6 +41,12 @@ public enum ErrorCode {
     /** 已登录但角色不够（L6-6 RBAC） */
     FORBIDDEN(4030, "无权限访问"),
 
+    /** 网关没有匹配到任何路由（L7-5）：路径写错或前缀不是 /api */
+    NOT_FOUND(4040, "接口不存在"),
+
+    /** 网关匹配到路由，但注册中心里没有可用实例（L7-5） */
+    SERVICE_UNAVAILABLE(5030, "服务不可用，请稍后重试"),
+
     /** 用户服务不可用（Sentinel 降级：调用不通时由 fallback 抛出，L4） */
     USER_SERVICE_UNAVAILABLE(2002, "用户服务不可用，请稍后重试"),
 

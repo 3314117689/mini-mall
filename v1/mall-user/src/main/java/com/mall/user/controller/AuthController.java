@@ -17,7 +17,10 @@ import org.springframework.web.bind.annotation.RestController;
 
 import com.mall.common.result.Result;
 import com.mall.user.auth.JwtKeyLoader;
+import com.mall.user.dto.LoginDTO;
+import com.mall.user.dto.LoginVO;
 import com.mall.user.entity.User;
+import com.mall.user.service.AuthService;
 import com.mall.user.service.UserService;
 
 /**
@@ -33,6 +36,15 @@ public class AuthController {
 
     @Autowired
     private UserService userService;
+
+    @Autowired
+    private AuthService authService;
+
+    /** 登录（L6-3）：用户名 + 密码换 token；失败统一 1005 */
+    @PostMapping("/login")
+    public Result<LoginVO> login(@RequestBody LoginDTO dto) {
+        return Result.ok(authService.login(dto));
+    }
 
     /**
      * 注册（L6-2）：放在 /auth 下，因为 /user/** 以后要登录才能访问。

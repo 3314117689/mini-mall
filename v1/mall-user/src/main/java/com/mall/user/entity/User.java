@@ -23,6 +23,9 @@ public class User {
 
     private String phone;
 
+    /** 角色（L6 RBAC）：USER 普通用户 / ADMIN 管理员；新建用户由数据库默认值给 USER */
+    private String role;
+
     /** 数据库列名是 create_time，靠驼峰映射自动对应 */
     private LocalDateTime createTime;
 }

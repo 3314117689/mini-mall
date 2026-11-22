@@ -15,11 +15,11 @@ import com.mall.user.entity.User;
 @Mapper
 public interface UserMapper {
 
-    @Select("select id, username, password, phone, create_time from user where id = #{id}")
+    @Select("select id, username, password, phone, role, create_time from user where id = #{id}")
     User selectById(Long id);
 
     /** 按用户名查（L6-2 注册查重 / L6-3 登录校验共用）；查不到返回 null */
-    @Select("select id, username, password, phone, create_time from user where username = #{username}")
+    @Select("select id, username, password, phone, role, create_time from user where username = #{username}")
     User selectByUsername(String username);
 
     /**

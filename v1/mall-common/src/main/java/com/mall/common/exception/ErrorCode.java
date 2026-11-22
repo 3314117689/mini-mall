@@ -26,6 +26,9 @@ public enum ErrorCode {
     /** 注册时用户名已被占用（L6-2） */
     USERNAME_EXISTS(1004, "用户名已存在"),
 
+    /** 登录失败（L6-3）：用户不存在和密码错误共用一个码，不暴露用户名是否存在 */
+    PASSWORD_ERROR(1005, "用户名或密码错误"),
+
     /** 用户服务不可用（Sentinel 降级：调用不通时由 fallback 抛出，L4） */
     USER_SERVICE_UNAVAILABLE(2002, "用户服务不可用，请稍后重试"),
 

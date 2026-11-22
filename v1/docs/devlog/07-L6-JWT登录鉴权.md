@@ -29,7 +29,7 @@ L0~L5 的 `POST /order/create` 里，`userId` 是客户端自己填的：谁都�
 |---|---|---|
 | L6-1 | 生成 RSA 密钥对；`mall-user` 出 JWKS 端点 | ✅ |
 | L6-2 | 注册走 BCrypt；用户名唯一；存量密码迁移 | ✅ |
-| L6-3 | `role` 列；登录签发 RS256 token | 未开始 |
+| L6-3 | `role` 列；登录签发 RS256 token | ✅ |
 | L6-4 | `mall-common` 鉴权组件 + order 注册拦截器 | 未开始 |
 | L6-5 | 下单取当前用户；user 鉴权；Feign 透传 token | 未开始 |
 | L6-6 | `@RequireRole` RBAC 演示 | 未开始 |
@@ -443,3 +443,199 @@ POST /auth/register {"username":"l6test","password":"123456","phone":"1390000000
 1. 为什么查重要放在加密之前？
 2. 同一个密码两次注册，哈希为什么不同？登录时怎么还能比对成功？
 3. 为什么只引 `spring-security-crypto`，不引 `spring-boot-starter-security`？
+
+
+---
+
+## 十一、L6-3 登录签发 JWT
+
+### 先加 role 列（本步前置）
+
+```sql
+ALTER TABLE db_user.user
+ADD COLUMN role varchar(20) NOT NULL DEFAULT 'USER' COMMENT '角色：USER/ADMIN（L6 RBAC）';
+
+UPDATE db_user.user SET role = 'ADMIN' WHERE username = 'zhangsan';
+-- Rows affected: 1
+```
+
+- 为什么带默认值：`NOT NULL` 加在没有默认值的列上，已有 4 行无法填值；`DEFAULT 'USER'` 让存量行自动补上。
+- `UserMapper` 两条 `select` 也补上了 `role` 列，否则实体里 `role` 永远是 `null`。
+
+**命令入场**：`POST http://localhost:8081/auth/login`
+body：`{"username":"zhangsan","password":"123456"}`
+
+**调用链**
+
+| 顺序 | 谁 | 在哪 | 干了什么 |
+|---|---|---|---|
+| 1 | Tomcat 线程 | — | 按路径找到 `AuthController.login` |
+| 2 | 框架 | — | JSON → `LoginDTO` |
+| 3 | `AuthController.login` | 第 44-47 行 | 调 `authService.login(dto)` |
+| 4 | `AuthServiceImpl.login` | 第 37-40 行 | 参数校验 |
+| 5 | `UserMapper.selectByUsername` | 第 22-23 行 | 按用户名查用户（含 password、role） |
+| 6 | `AuthServiceImpl.login` | 第 44 行 | `passwordEncoder.matches` 比对 |
+| 7 | `JwtIssuer.issue` | 第 29-42 行 | 组 header/payload、私钥签名、compact |
+| 8 | `AuthServiceImpl.login` | 第 52-56 行 | 组装 `LoginVO` |
+| 9 | `AuthController.login` | 第 46 行 | `Result.ok(vo)` |
+
+**数据编号**
+
+| 编号 | 数据 | 初始值 | 谁产生 |
+|---|---|---|---|
+| `[D1]` | 登录请求 | `LoginDTO{username=zhangsan, password=123456}` | 框架从 JSON 转换 |
+| `[D2]` | 查询到的用户 | `User{id=1, password=$2a$10$bwSq..., role=ADMIN}` | MyBatis |
+| `[D3]` | 比对结果 | `true` | `PasswordEncoder.matches` |
+| `[D4]` | 过期时刻 | `now + 7200 秒` | `JwtIssuer` 算 |
+| `[D5]` | token | `eyJkid...` 三段字符串 | `Jwts.builder().compact()` |
+| `[D6]` | 响应体 | `{"code":0,"data":{"token":...,"tokenType":"Bearer","expiresIn":7200}}` | `Result.ok` |
+
+**三个结局（总览）**
+
+| 结局 | 分岔点 | 条件 | 浏览器 |
+|---|---|---|---|
+| ① 登录成功 | 第 44 行 | 用户存在且 `matches` 为 true | `code=0` + token |
+| ② 用户不存在或密码错 | 第 44 行 | `user == null` 或 `matches` 为 false | `code=1005` |
+| ③ 参数缺失 | 第 37 行 | username/password 为 null 或空白 | `code=1000` |
+
+### 结局①逐步行进：登录成功
+
+#### 第 1 步｜请求到达，JSON 变 DTO
+
+- 【框架动作】Spring MVC 按 `@PostMapping("/login")`（第 44 行）匹配；`@RequestBody`（第 45 行）把 JSON 转成 `LoginDTO`。
+- 【数据】`[D1]` 产生。
+
+#### 第 2 步｜参数校验
+
+```java
+// 文件：mall-user/src/main/java/com/mall/user/service/impl/AuthServiceImpl.java
+// 行号：37-40
+if (dto.getUsername() == null || dto.getUsername().isBlank()
+        || dto.getPassword() == null || dto.getPassword().isBlank()) {
+    throw new BizException(ErrorCode.PARAM_ERROR);
+}
+```
+
+- 【你写的】任一为空抛 1000。
+- 【数据】`[D1]` 两个字段非空 → 继续。
+
+#### 第 3 步｜按用户名查库
+
+```java
+// 行号：42
+User user = userMapper.selectByUsername(dto.getUsername());
+```
+
+- 【框架动作】MyBatis 执行 `select id, username, password, phone, role, create_time from user where username = ?`。
+- 【数据】MySQL 一行 → `[D2] = User{id=1, username=zhangsan, password="$2a$10$bwSq...", role="ADMIN"}`。
+
+#### 第 4 步｜BCrypt 比对
+
+```java
+// 行号：43-47
+// 用户不存在 和 密码错误 返回同一个 1005：不让攻击者试出"哪些用户名存在"
+if (user == null || !passwordEncoder.matches(dto.getPassword(), user.getPassword())) {
+    log.warn("登录失败, username={}", dto.getUsername());
+    throw new BizException(ErrorCode.PASSWORD_ERROR);
+}
+```
+
+- 【你写的】`user == null` 与 `matches` 两个条件，任一成立就 1005。
+- 【框架动作】`BCryptPasswordEncoder.matches(明文, 哈希)`（框架：Spring Security Crypto）：从哈希里取出盐 → 用同样的盐和轮数算一遍 → 比较结果。**不是解密**，哈希不可逆。
+- 【数据】`[D3] = true`（`123456` 与库里的哈希匹配）→ 条件 false → 继续。
+
+#### 第 5 步｜组 header 和 payload
+
+```java
+// 文件：mall-user/src/main/java/com/mall/user/auth/JwtIssuer.java
+// 行号：29-40
+public String issue(User user) {
+    Instant now = Instant.now();
+    return Jwts.builder()
+            // kid 写进 header，验签方据此在 JWKS 里挑选公钥
+            .header().keyId(keyLoader.getKid()).and()
+            // sub 存用户 id：验签后 sub 就是可信的 userId
+            .subject(String.valueOf(user.getId()))
+            .claim("username", user.getUsername())
+            .claim("role", user.getRole())
+            .issuedAt(Date.from(now))
+            .expiration(Date.from(now.plusSeconds(ttlSeconds)))
+```
+
+- 【你写的】`kid` 放 header；`sub` 放 userId（注意 `String.valueOf`，JWT 的 sub 是字符串）；`username`、`role` 放自定义 claim；`iat`/`exp` 是时间戳。
+- 【数据】`[D4] = now + 7200`；payload = `{"sub":"1","username":"zhangsan","role":"ADMIN","iat":...,"exp":...}`。
+
+#### 第 6 步｜私钥签名
+
+```java
+// 行号：41-42
+            // RS256：私钥签名，公钥验签
+            .signWith(keyLoader.getPrivateKey(), Jwts.SIG.RS256)
+            .compact();
+```
+
+- 【框架动作】`signWith`（框架：jjwt）用 RSA 私钥对 `base64url(header) + "." + base64url(payload)` 做 SHA-256 摘要再 RSA 签名，拼成第三段。
+- 【数据】`[D5]` = `header.payload.signature` 三段，签名段 342 个字符（2048 位 RSA）。
+
+#### 第 7 步｜组装返回
+
+```java
+// 行号：52-56
+LoginVO vo = new LoginVO();
+vo.setToken(token);
+vo.setTokenType("Bearer");
+vo.setExpiresIn(jwtIssuer.getTtlSeconds());
+```
+
+- 【你写的】token 原样给前端；`Bearer` 是 HTTP 头的固定前缀（`Authorization: Bearer <token>`）。
+- 【数据】`[D5]` → `[D6]`。
+
+### 结局②逐步行进：用户不存在或密码错
+
+第 1~3 步同结局①。
+
+- 【数据】两种子情况：
+  - 用户名不存在：`[D2] = null`；
+  - 密码错：`[D2]` 有值，但 `matches("wrong", 哈希)` 返回 `false` → `[D3] = false`。
+- 【你写的】第 46 行抛 `BizException(PASSWORD_ERROR)`；第 49 行签发不执行。
+- 【数据】`[D4]`、`[D5]` 不产生；`[D6] = {"code":1005,"msg":"用户名或密码错误"}`。
+
+> 两种子情况对外完全一样，这是故意的：如果"用户不存在"单独给 1001，攻击者就能批量试出哪些用户名注册过（用户名枚举）。
+
+### 结局③逐步行进：参数缺失
+
+- 【你写的】第 39 行抛 `PARAM_ERROR`，不查库、不比对、不签发。
+- 【数据】`[D2]`~`[D5]` 都不产生；`[D6] = {"code":1000,"msg":"参数错误"}`。
+
+### L6-3 实测
+
+```text
+POST /auth/login {"username":"zhangsan","password":"123456"}
+→ code=0, expiresIn=7200
+header : {"kid":"mall-l6-dev","alg":"RS256"}
+payload: {"sub":"1","username":"zhangsan","role":"ADMIN","iat":1795346854,"exp":1795354054}
+sigLen : 342
+
+POST /auth/login {"username":"zhangsan","password":"wrong"}
+→ {"code":1005,"data":null,"msg":"用户名或密码错误"}
+```
+
+### L6-3 坑
+
+1. `sub` 是字符串：验签后要 `Long.valueOf(claims.getSubject())`，直接强转 `Long` 会 `ClassCastException`。
+2. `iat`/`exp` 用 `Date`，用 `Instant` 直接塞会编译报错（jjwt 0.12 的 `expiration(Date)`）。
+3. 用户不存在与密码错误必须同码，否则等于给攻击者一个用户名探测器。
+4. JWT 是无状态的：服务端不存 session，所以**发出去的 token 在过期前无法单独作废**（要作废得引入黑名单/短 TTL + 刷新令牌，本项目不做）。
+5. `role` 改了要重新登录才生效：token 里的 `role` 是签发那一刻的快照。
+
+### L6-3 断点验证与自测题
+
+| 停在哪 | 看什么 | 看到什么证明走对了 |
+|---|---|---|
+| `AuthServiceImpl.login` 第 42 行后 | `user.getPassword()`、`user.getRole()` | 以 `$2a$10$` 开头；`ADMIN` |
+| 第 44 行 | `passwordEncoder.matches(...)` 的返回值 | `true` |
+| `JwtIssuer.issue` 第 41 行 | `keyLoader.getPrivateKey().getAlgorithm()` | `RSA` |
+
+1. BCrypt 的 `matches` 为什么不需要"解密"？
+2. token 里为什么要放 `role`，而不是每次查库？
+3. 用户改了角色，旧 token 还能通过角色校验吗？为什么？

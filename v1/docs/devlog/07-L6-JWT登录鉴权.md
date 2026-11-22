@@ -31,7 +31,7 @@ L0~L5 的 `POST /order/create` 里，`userId` 是客户端自己填的：谁都�
 | L6-2 | 注册走 BCrypt；用户名唯一；存量密码迁移 | ✅ |
 | L6-3 | `role` 列；登录签发 RS256 token | ✅ |
 | L6-4 | `mall-common` 鉴权组件 + order 注册拦截器 | ✅ |
-| L6-5 | 下单取当前用户；user 鉴权；Feign 透传 token | 未开始 |
+| L6-5 | 下单取当前用户；user 鉴权；Feign 透传 token | ✅ |
 | L6-6 | `@RequireRole` RBAC 演示 | 未开始 |
 | L6-7 | 全链路实测 + 文档收尾 | 未开始 |
 
@@ -852,3 +852,184 @@ JWKS 已加载, kid=mall-l6-dev   ← 只有第一次带 token 的请求打印
 3. `afterCompletion` 必须清 ThreadLocal；Tomcat 默认 200 个线程复用，漏清就是"下一个用户看到上一个用户的身份"。
 4. JWKS 是**懒加载**：服务启动时不拉，第一次验签才拉；所以用户服务重启换了密钥，订单侧要等 `kid` 变了才会重新拉。
 5. 公钥缓存后，用户服务短暂宕机不影响已缓存 `kid` 的验签——这是本地验签的收益，也是"无法即时吊销"的代价。
+
+
+---
+
+## 十三、L6-5 下单取当前用户 + 用户服务鉴权 + Feign 透传 token
+
+**命令入场**：`POST http://localhost:8083/order/create`
+请求头：`Authorization: Bearer <lisi 的 token>`
+body：`{"productId":1,"num":2}`（**没有 userId 了**）
+
+**调用链**
+
+| 顺序 | 谁 | 在哪 | 干了什么 |
+|---|---|---|---|
+| 1 | `JwtInterceptor`（order） | L6-4 | 验签 → `UserContext` 存 `LoginUser{userId=2}` 和原始 token |
+| 2 | `OrderController.create` | 第 41-44 行 | `@CurrentUser Long userId` 由参数解析器填入 `2` |
+| 3 | `OrderServiceImpl.create` | 第 60-67 行 | 校验商品/数量，调远程 |
+| 4 | `RemoteService.getUser` | 第 43-50 行 | Sentinel 资源 → `userClient.getById(2)` |
+| 5 | `FeignTokenInterceptor.apply` | 第 25-31 行 | 从 `UserContext.getToken()` 取票，加到 Feign 请求头 |
+| 6 | `JwtInterceptor`（user） | `mall-user/config/JwtWebConfig` | user-service 验同一张票 |
+| 7 | `UserController.getById` | 第 28-31 行 | 返回 `Result<User>` |
+| 8 | `RemoteService.getUser` | 第 49 行 | 取 `result.getData()` |
+| 9 | `OrderServiceImpl.create` | 第 69-77 行 | 组订单、服务端算金额、落库 |
+
+**数据编号**
+
+| 编号 | 数据 | 初始值 | 谁产生 |
+|---|---|---|---|
+| `[D1]` | 请求体 | `OrderCreateDTO{productId=1, num=2}` | 框架从 JSON 转换 |
+| `[D2]` | 当前 userId | `2L` | `@CurrentUser` 解析器从 `UserContext` 取 |
+| `[D3]` | 原始 token | `eyJraWQiOi...` | `JwtInterceptor` 存入 `UserContext` |
+| `[D4]` | Feign 请求头 | `Authorization: Bearer [D3]` | `FeignTokenInterceptor` |
+| `[D5]` | 用户 | `UserDTO{id=2, username=lisi}` | user-service 经 Feign 返回 |
+| `[D6]` | 商品 | `ProductDTO{id=1, price=9.90}` | product-service 经 Feign 返回 |
+| `[D7]` | 订单金额 | `19.80` | `price × num` |
+| `[D8]` | 订单 id | `6` | MySQL 自增回填 |
+
+**四个结局（总览）**
+
+| 结局 | 分岔点 | 条件 | 浏览器 |
+|---|---|---|---|
+| ① 下单成功 | 第 61 行校验通过 | 商品/数量合法，token 有效 | `code=0, data=6` |
+| ② 没带 token | order 的 `JwtInterceptor` | 无 `Authorization` | `code=4010` |
+| ③ 用户服务收不到票 | `FeignTokenInterceptor` 没生效 | Feign 请求无 token | user 返回 4010，order 判 code≠0 → 1001 |
+| ④ 数量非法 | 第 61 行 | `num` 为 null 或 `<= 0` | `code=1000` |
+
+### 结局①逐步行进：下单成功
+
+#### 第 1 步｜拦截器先把身份放进上下文
+
+同 L6-4 结局①第 1~5 步；区别是 L6-5 多存了一份原始 token。
+
+```java
+// 文件：mall-common/src/main/java/com/mall/common/auth/JwtInterceptor.java
+// 行号：35-38
+String token = authorization.substring(BEARER_PREFIX.length()).trim();
+UserContext.set(jwtVerifier.verify(token));
+UserContext.setToken(token);
+return true;
+```
+
+- 【数据】`UserContext` 里现在有两样：`LoginUser{userId=2,...}` 和 `[D3]`。
+
+#### 第 2 步｜Controller 直接拿到 userId
+
+```java
+// 文件：mall-order/src/main/java/com/mall/order/controller/OrderController.java
+// 行号：41-44
+@PostMapping("/create")
+public Result<Long> create(@RequestBody OrderCreateDTO dto, @CurrentUser Long userId) {
+    return Result.ok(orderService.create(userId, dto));
+}
+```
+
+- 【注解】`@CurrentUser` 不是 Spring 自带注解，是我们在 `mall-common` 定义的标记；真正干活的是 `CurrentUserArgumentResolver`。
+- 【框架动作】Spring MVC 准备方法参数时，遍历所有 `HandlerMethodArgumentResolver`，发现这个参数带 `@CurrentUser` 且类型是 `Long` → 调 `resolveArgument` → 返回 `UserContext.get().getUserId()`。
+- 【数据】`[D1]` 从 body 来；`[D2] = 2L` 从上下文来。两者不是同一条数据，来源不同。
+
+#### 第 3 步｜校验 + 远程调用户
+
+```java
+// 文件：mall-order/src/main/java/com/mall/order/service/impl/OrderServiceImpl.java
+// 行号：60-67
+public Long create(Long userId, OrderCreateDTO dto) {
+    if (dto.getProductId() == null || dto.getNum() == null || dto.getNum() <= 0) {
+        throw new BizException(ErrorCode.PARAM_ERROR);
+    }
+    log.info("下单, userId={}, productId={}, num={}", userId, dto.getProductId(), dto.getNum());
+
+    UserDTO user = remoteService.getUser(userId);
+    ProductDTO product = remoteService.getProduct(dto.getProductId());
+```
+
+- 【你写的】校验只看商品和数量；`userId` 不校验，因为它来自已验签的 token，天然可信。
+- 【数据】`[D2]=2L` 作为参数进入 `RemoteService.getUser(2L)`。
+
+#### 第 4 步｜Feign 发请求前补票
+
+```java
+// 文件：mall-order/src/main/java/com/mall/order/config/FeignTokenInterceptor.java
+// 行号：25-31
+@Override
+public void apply(RequestTemplate template) {
+    String token = UserContext.getToken();
+    if (token != null && !template.headers().containsKey(AUTHORIZATION)) {
+        template.header(AUTHORIZATION, "Bearer " + token);
+    }
+}
+```
+
+- 【你写的】从 `UserContext` 取原始 token，拼成 `Bearer xxx` 加到 Feign 请求头。
+- 【框架动作】Feign（框架：OpenFeign）在真正发 HTTP 前回调所有 `RequestInterceptor`；`@Component` 的拦截器会被自动收集。
+- 【数据】`[D3]` → `[D4]`；如果没有这一步，`[D4]` 不存在，结局③。
+
+#### 第 5 步｜用户服务验票
+
+- 【框架动作】user-service 的 `JwtInterceptor` 读 `[D4]` → 验签 → `UserContext`；这次验签用的是 user 服务自己的 `JwtVerifier`，公钥仍然从 `/auth/jwks` 拉（指向自己）。
+- 【数据】`[D4]` → `LoginUser{userId=2}`；`GET /user/2` 正常执行，返回 `Result<User>`。
+- 注意：如果第 4 步没加头，这里会抛 4010，order 侧 `RemoteService.getUser` 看到 `code != 0` → 抛 1001（用户不存在），表现成"下单失败但提示用户不存在"，很容易误判。
+
+#### 第 6 步｜算钱、落库
+
+```java
+// 行号：69-77
+Order order = new Order();
+order.setUserId(user.getId());
+order.setProductId(product.getId());
+order.setNum(dto.getNum());
+// 金额只在服务端计算，客户端伪造不了
+order.setAmount(product.getPrice().multiply(BigDecimal.valueOf(dto.getNum())));
+orderMapper.insert(order);
+```
+
+- 【你写的】`order.setUserId(user.getId())` 用的是**远程查回来的用户 id**，与 `[D2]` 相同。
+- 【数据】`[D5]=2`、`[D6]={id=1, price=9.90}`、`[D1].num=2` → `[D7] = 19.80`；INSERT 后 `[D8] = 6`。
+
+### 结局②逐步行进：没带 token
+
+同 L6-4 结局②：`/order/**` 在进 Controller 前就被拦，`[D1]` 都不会被解析。
+响应 `{"code":4010,"data":null,"msg":"未登录，请先登录"}`。
+
+### 结局③逐步行进：Feign 没带票
+
+假设去掉 `FeignTokenInterceptor`：
+
+- 【框架动作】`userClient.getById(2)` 发出的请求没有 `Authorization` → user-service 的 `JwtInterceptor` 抛 4010。
+- 【数据】HTTP 状态仍是 200，body 是 `Result{code=4010,data=null}`；Feign 正常反序列化，**不抛异常**。
+- 【你写的】`RemoteService.getUser` 第 46 行判断 `code != 0` → 抛 `BizException(USER_NOT_FOUND)`（1001）。
+- 【数据】响应 `{"code":1001,"msg":"用户不存在"}`——明明是没带票，却提示用户不存在，这就是透传必须做的原因。
+
+### 结局④逐步行进：数量非法
+
+- 【你写的】第 61 行条件成立 → 抛 1000，远程调用和落库都不执行。
+- 【数据】`[D5]`~`[D8]` 都不产生；响应 `{"code":1000,"msg":"参数错误"}`。
+
+### L6-5 实测
+
+```text
+lisi 登录 → token 494 字符
+
+GET /user/2（无头）          → {"code":4010,...}
+GET /user/2（Bearer）        → {"code":0,"data":{"id":2,"username":"lisi","role":"USER",...}}
+
+POST /order/create {"productId":1,"num":2}（Bearer lisi）
+→ {"code":0,"data":6}
+库：orders id=6, user_id=2, product_id=1, num=2, amount=19.80
+
+POST /order/create（无头）    → {"code":4010,...}
+
+构造伪造：body 里塞 {"userId":1,"productId":1,"num":1}，token 仍是 lisi
+→ {"code":0,"data":7}
+库：orders id=7, user_id=2  ← 客户端传的 userId=1 被完全忽略
+```
+
+### L6-5 坑
+
+1. `@CurrentUser` 只支持 `Long`/`long` 参数（见 `CurrentUserArgumentResolver.supportsParameter`）；想拿整个 `LoginUser` 得自己扩。
+2. Feign 透传依赖"同一个线程"：默认 Feign 同步调用没问题；一旦用 `@Async`/线程池发起调用，ThreadLocal 读不到 token（L9 的 CompletableFuture 也要处理）。
+3. `UserContext.clear()` 同时清用户和 token；只清一个会留下另一个给下一个请求。
+4. `/order/**` 现在还包含 L0 的 `POST /order`（直接写库、body 带 userId），它是教学遗留接口，生产不应暴露给客户端；真正的业务入口是 `/order/create`。
+5. 订单查询没有校验"这张订单是不是当前用户的"（越权读）；RBAC 只解决角色，不解决数据归属，属于后续可扩展点。

@@ -10,6 +10,7 @@ import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RestController;
 
+import com.mall.common.auth.CurrentUser;
 import com.mall.common.result.Result;
 import com.mall.order.dto.OrderCreateDTO;
 import com.mall.order.entity.Order;
@@ -34,12 +35,12 @@ public class OrderController {
 	}
 
 	/**
-	 * 下单：只接收 userId/productId/num，金额由服务端调商品服务后计算。
-	 * 与 save 分开，是为了不把"下单编排"和"纯写库"混在一起。
+	 * 下单：只接收 productId/num，userId 由 @CurrentUser 从 token 解析（L6-5）。
+	 * 这样客户端改不了"替谁下单"。
 	 */
 	@PostMapping("/create")
-	public Result<Long> create(@RequestBody OrderCreateDTO dto) {
-		return Result.ok(orderService.create(dto));
+	public Result<Long> create(@RequestBody OrderCreateDTO dto, @CurrentUser Long userId) {
+		return Result.ok(orderService.create(userId, dto));
 	}
 
 	@PutMapping

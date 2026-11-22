@@ -34,6 +34,7 @@ public class JwtInterceptor implements HandlerInterceptor {
         }
         String token = authorization.substring(BEARER_PREFIX.length()).trim();
         UserContext.set(jwtVerifier.verify(token));
+        UserContext.setToken(token);
         return true;
     }
 

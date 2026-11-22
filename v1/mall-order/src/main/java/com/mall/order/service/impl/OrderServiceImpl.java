@@ -50,21 +50,20 @@ public class OrderServiceImpl implements OrderService {
 
 	/**
 	 * 下单编排：
-	 * 1. 调用户服务确认用户存在；
-	 * 2. 调商品服务拿到价格；
-	 * 3. 服务端用 单价 × 数量 算金额，客户端传的金额一律不信任；
-	 * 4. 落库并返回订单 id。
+	 * 1. 校验商品 id 和数量；
+	 * 2. 调用户服务确认用户存在（userId 来自 token，已可信）；
+	 * 3. 调商品服务拿到价格；
+	 * 4. 服务端用 单价 × 数量 算金额，客户端传的金额一律不信任；
+	 * 5. 落库并返回订单 id。
 	 */
 	@Override
-	public Long create(OrderCreateDTO dto) {
-		if (dto.getUserId() == null || dto.getProductId() == null
-				|| dto.getNum() == null || dto.getNum() <= 0) {
+	public Long create(Long userId, OrderCreateDTO dto) {
+		if (dto.getProductId() == null || dto.getNum() == null || dto.getNum() <= 0) {
 			throw new BizException(ErrorCode.PARAM_ERROR);
 		}
-		log.info("下单, userId={}, productId={}, num={}",
-				dto.getUserId(), dto.getProductId(), dto.getNum());
+		log.info("下单, userId={}, productId={}, num={}", userId, dto.getProductId(), dto.getNum());
 
-		UserDTO user = remoteService.getUser(dto.getUserId());
+		UserDTO user = remoteService.getUser(userId);
 		ProductDTO product = remoteService.getProduct(dto.getProductId());
 
 		Order order = new Order();

@@ -10,10 +10,10 @@ public interface OrderService {
 	Long save(Order order);
 
 	/**
-	 * 下单：先调用用户服务、商品服务校验并取价格，
+	 * 下单：userId 来自登录 token，商品和价格来自商品服务，
 	 * 由服务端计算金额后落库，返回订单 id。
 	 */
-	Long create(OrderCreateDTO dto);
+	Long create(Long userId, OrderCreateDTO dto);
 
 	/** 更新订单，订单不存在时抛业务异常 */
 	void update(Order order);

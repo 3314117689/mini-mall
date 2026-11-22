@@ -38,7 +38,7 @@ L8 不加新框架，只改 **SQL、索引、表结构**，把这三类症状逐
 | L8-2 | 联合索引 `(user_id, create_time)`，EXPLAIN 前后对比 | ✅ |
 | L8-3 | 深翻页三版对比（limit / 延迟关联 / 游标） | ✅ |
 | L8-4 | 按月 RANGE 分区（`orders_p` + rename） | ✅ |
-| L8-5 | 总验收、收尾、提交 | 待做 |
+| L8-5 | 总验收、收尾、提交 | ✅ |
 
 ## 四、L8-0 基线体检
 
@@ -879,3 +879,60 @@ type = ref  key = idx_user_create  Extra = Using where（没有 filesort）
 1. 为什么分区表的主键必须带上 `create_time`？不加会怎样？
 2. 按 `id` 查一条订单，分区表比普通表快还是慢？为什么？
 3. 已有 `pmax` 的情况下，怎么新增下个月分区？为什么不能直接 `ADD PARTITION`？
+
+## 九、L8 总验收
+
+### 验收命令与结果
+
+```text
+1. GET  /api/order/page?userId=1&page=1&size=3
+   → code=0，3 条，first=100007
+
+2. GET  /api/order/page?userId=1&page=8000&size=10
+   → code=0，10 条，first=26
+
+3. GET  /api/order/cursor?userId=1&size=3
+   → code=0，3 条，last=100005
+
+4. GET  /api/order/cursor?...&lastCreateTime=<第3步最后一条时间>&lastId=100005&size=3
+   → code=0，3 条，first=100004（与上一页无重叠）
+
+5. GET  /api/order/100007
+   → code=0，id=100007（分区表主键查询仍正常）
+
+6. GET  /api/order/page?userId=1&page=0&size=10
+   → code=1000，参数错误
+```
+
+### 验收表
+
+| # | 验收项 | 证据 | 结果 |
+|---|---|---|---|
+| 1 | 造数 | `orders` 100009 行，2024-12 ~ 2026-11，user 1 占 80005 | ✅ |
+| 2 | 优化前基线 | `type=ALL`、`key=NULL`、`Extra=Using filesort`、`Handler_read_rnd_next=100010` | ✅ |
+| 3 | 联合索引消除 filesort | `type=ref`、`key=idx_user_create`、`Extra` 无 filesort | ✅ |
+| 4 | 浅页提速 | SQL `0.0604~0.0748s` → `0.00038~0.00040s` | ✅ |
+| 5 | 深页反直觉 | `offset=79990` 时索引版 `0.57~0.71s`，全表版 `0.09~0.14s` | ✅ 已记录 |
+| 6 | 延迟关联 | 同 offset 下 `0.021~0.027s`，约 3 倍 | ✅ |
+| 7 | 游标分页 | 同位置 `0.0003~0.0005s`，`Handler_read_prev=9` | ✅ |
+| 8 | 分区裁剪 | 单月查询 `partitions=p202601`，读 4251 行（原 100009 行） | ✅ |
+| 9 | 按 id 查代价 | `partitions` 显示 26 个分区全部打开 | ✅ 已记录 |
+| 10 | 分区维护 | `REORGANIZE pmax` 新增 `p202701`，可 `drop partition` 回退 | ✅ |
+| 11 | 切换与回滚 | rename 后三个接口全部 `code=0`，回滚 SQL 已写入 `06` | ✅ |
+| 12 | 编译 | `mvn -q -DskipTests install` 通过 | ✅ |
+
+### 面试口径（三句话）
+
+1. **索引解决过滤和排序，不解决大偏移**：`(user_id, create_time)` 让浅页从 60ms 降到 0.4ms，但深页反而从 0.1s 变成 0.6s，因为是 8 万次索引遍历 + 随机回表。
+2. **延迟关联减少回表，游标分页消除偏移**：前者把同位置耗时降到 20ms，后者降到 0.3ms 且与页深无关，代价是不能跳页。
+3. **分区解决时间范围裁剪，不替代索引**：按月分区后单月查询只读 4251 行；但 `id` 不是分区列，按主键查会打开全部分区，所以分区键要和查询模式匹配。
+
+## 十、L8 遗留与回滚
+
+| 项 | 现状 | 回滚方式 |
+|---|---|---|
+| `orders` 已分区 | 26 个分区，主键 `(id, create_time)` | `rename table orders to orders_p_bad, orders_bak_l8_part to orders;` |
+| 旧非分区全量表 | `orders_bak_l8_part`（100009 行） | 同上 |
+| 造数前原始 9 行 | `orders_bak_l8` | `truncate orders; insert into orders select * from orders_bak_l8;`（会丢掉分区表结构，仅恢复数据） |
+| 索引 | `idx_user_create(user_id, create_time)` | `alter table orders drop index idx_user_create;` |
+| 测试数据 | 10 万条跨月数据仍在库中 | 按需清理，不影响代码 |

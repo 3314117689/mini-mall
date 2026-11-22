@@ -37,7 +37,7 @@ L8 不加新框架，只改 **SQL、索引、表结构**，把这三类症状逐
 | L8-1 | 造 10 万跨月数据 + `/order/page`、`/order/cursor` | ✅ |
 | L8-2 | 联合索引 `(user_id, create_time)`，EXPLAIN 前后对比 | ✅ |
 | L8-3 | 深翻页三版对比（limit / 延迟关联 / 游标） | ✅ |
-| L8-4 | 按月 RANGE 分区（`orders_p` + rename） | 待做 |
+| L8-4 | 按月 RANGE 分区（`orders_p` + rename） | ✅ |
 | L8-5 | 总验收、收尾、提交 | 待做 |
 
 ## 四、L8-0 基线体检
@@ -673,3 +673,209 @@ C /api/order/cursor          0.0319 / 0.0270 / 0.0176s
 1. 延迟关联为什么只快了 3 倍，而游标分页能快 200 倍？两者分别消除了哪部分成本？
 2. B 版 EXPLAIN 里出现 `Using filesort`，为什么说它仍然比 A 好？
 3. 游标分页在什么业务场景下不能用？如果产品要求"跳页"怎么办？
+
+## 八、L8-4 按月 RANGE 分区
+
+**命令入场**
+
+```sql
+-- A. 按时间范围统计某个月
+select count(*) from orders
+where create_time >= '2026-01-01' and create_time < '2026-02-01';
+
+-- B. 按主键查一条
+select id, user_id, product_id, num, amount, create_time
+from orders where id = 50015;
+
+-- C. 分页接口用的查询（不带分区列范围）
+select id, user_id, product_id, num, amount, create_time
+from orders where user_id = 1
+order by create_time desc, id desc limit 0, 10;
+```
+
+**本步改动**
+
+| 文件 | 归属 | 作用 |
+|---|---|---|
+| `v1/docs/sql/L8/05-create-partitioned.sql` | 本项目 | 建 `orders_p`（按月分区）+ 导数据 + 校验 |
+| `v1/docs/sql/L8/06-rename-orders.sql` | 本项目 | 原子 rename：`orders` → `orders_bak_l8_part`，`orders_p` → `orders` |
+| `v1/docs/sql/L8/07-maintain-partition.sql` | 本项目 | `REORGANIZE pmax` 新增下月分区 |
+| `orders` 表定义 | 数据库对象 | `PARTITION BY RANGE COLUMNS(create_time)`，主键 `(id, create_time)` |
+
+> Java 代码本步仍**零改动**。rename 之后 Mapper 里的表名 `orders` 不变，MyBatis 无感知。
+
+**调用链**
+
+- SQL 层之前：`OrderMapper` 发出的仍是 `from orders ...`，与 L8-1/2/3 完全一样。
+- SQL 层新增：MySQL 解析出 `create_time` 条件后，先做**分区裁剪**（决定打开哪几个分区），再在每个分区内走 `idx_user_create`。
+
+**数据编号**
+
+| 编号 | 数据 | 初始值 | 谁产生 |
+|---|---|---|---|
+| `[D1]` | 分区键 | `create_time` | DDL |
+| `[D2]` | 分区表 | `orders_p`（26 个分区：p202412~p202612 + pmax） | DDL |
+| `[D3]` | 主键 | `(id, create_time)` | DDL，分区表强制要求 |
+| `[D4]` | 时间范围 | `2026-01-01 ~ 2026-02-01` | 查询条件 |
+| `[D5]` | 命中分区 | `p202601` | 分区裁剪 |
+| `[D6]` | 实际读行 | `Handler_read_next=4251` | MySQL |
+| `[D7]` | 切换动作 | 两条 rename 一条语句原子执行 | `06-rename-orders.sql` |
+
+**四个结局（总览）**
+
+| 结局 | 分岔点 | 条件 | 结果 |
+|---|---|---|---|
+| ① 命中单分区 | 分区裁剪 | 条件里直接给 `create_time` 范围 | 只打开 `p202601`，读 4251 行 |
+| ② 打开全部分区 | 分区裁剪 | 只给 `id`，不给 `create_time` | 26 个分区全部打开，每个分区各查一次主键 |
+| ③ 落到 pmax | 分区定义 | `create_time` 超出已建月份 | 写入/查询 pmax，裁剪收益消失 |
+| ④ 裁剪失效 | 条件写法 | 对分区列套函数，如 `date(create_time)=...` | 无法裁剪，退化成扫全部分区（规则推演） |
+
+### 结局①逐步行进：时间范围命中单分区
+
+#### 第 1 步｜建分区表
+
+```sql
+create table orders_p (
+    ...
+    primary key (id, create_time),
+    key idx_user_create (user_id, create_time)
+) partition by range columns(create_time) (
+    partition p202412 values less than ('2025-01-01'),
+    ...
+    partition p202612 values less than ('2027-01-01'),
+    partition pmax values less than (maxvalue)
+);
+```
+
+- 【你写的】26 个分区，每个分区管一个月；`pmax` 兜底。
+- 【框架动作】MySQL 为每个分区单独建一棵 `idx_user_create`（**局部索引**，没有跨分区的全局索引）。
+- 【数据】`[D2]`、`[D3]`。
+- 为什么主键要加 `create_time`：分区表的规则是**每个唯一键都必须包含分区列**，否则建表直接报错。
+
+#### 第 2 步｜导数据并校验
+
+```sql
+insert into orders_p (id, user_id, product_id, num, amount, create_time)
+select id, user_id, product_id, num, amount, create_time from orders;
+```
+
+- 【数据】`count(*)=100009`，与原表一致；各月分区行数 3840~4252，`p202612`、`pmax` 为 0。
+
+#### 第 3 步｜分区裁剪
+
+```text
+explain partitions select count(*) from orders
+where create_time >= '2026-01-01' and create_time < '2026-02-01';
+
+partitions = p202601
+type = index  key = idx_user_create  rows = 4251  Extra = Using where; Using index
+```
+
+- 【框架动作】优化器只把 `p202601` 加入执行计划，其余 25 个分区不打开。
+- 【数据】`[D5]=p202601`，`[D6]=Handler_read_next=4251`。
+- 对比分区前：同一条 SQL 在 `orders_bak_l8_part` 上读 `Handler_read_next=100009`。
+
+#### 第 4 步｜耗时对比
+
+- 【数据】分区前 `0.0285~0.0533s`，分区后 `0.0021~0.0087s`，约 10 倍。
+- 原因：读的行数从 10 万降到 4251，且这些行在同一个分区里连续存放。
+
+### 结局②逐步行进：按 id 查询打开所有分区
+
+```text
+explain partitions select ... from orders where id = 50015;
+
+partitions = p202412,p202501,...,p202612,pmax   （26 个全在）
+type = ref  key = PRIMARY  key_len = 8
+```
+
+- 【框架动作】`id` 不是分区列，MySQL 不知道这条记录在哪个月，只能把 26 个分区的主键索引都查一遍。
+- 【数据】结果仍然正确（`type=ref`、只返回 1 行），但代价是 26 次索引查找。
+- 结论：**分区裁剪只认分区列**。按 `id` 点查在分区表上不会更快，反而多打开 25 个分区。
+
+### 结局③逐步行进：落到 pmax
+
+- 【数据】如果写入 `create_time='2030-01-01'`，超出 `p202612` 的范围，会落进 `pmax`。
+- 【框架动作】`pmax values less than (maxvalue)` 是兜底，保证不会因为"没有对应分区"而插入失败。
+- 代价：`pmax` 里的数据时间跨度不受控，按时间范围查询时如果命中 `pmax`，裁剪就失去意义。所以生产要**提前建下个月分区**。
+
+### 结局④逐步行进：裁剪失效（规则推演）
+
+- 【数据】`where date(create_time) = '2026-01-01'`：对分区列套了函数，MySQL 5.7 无法在优化阶段确定分区范围。
+- 【框架动作】退化成打开所有分区逐行判断。
+- 规则：条件直接写在分区列上，用范围表达式，不要套函数。
+
+### 第 5 步｜切换到正式表
+
+```sql
+rename table orders to orders_bak_l8_part,
+             orders_p to orders;
+```
+
+- 【框架动作】两条 rename 在同一条语句里原子完成，业务不会看到"表不存在"的中间状态。
+- 【数据】`[D7]`；切换后 `count(*)=100009`，`page`、`getById`、`cursor` 三个接口实测都返回 `code=0`。
+- 回滚：`rename table orders to orders_p_bad, orders_bak_l8_part to orders;`
+
+### 第 6 步｜分区维护（新增下个月）
+
+```sql
+alter table orders reorganize partition pmax into (
+    partition p202701 values less than ('2027-02-01'),
+    partition pmax values less than (maxvalue)
+);
+```
+
+- 【框架动作】因为 `pmax` 已经是最后一个分区，不能直接 `ADD PARTITION` 到它后面；必须把 `pmax` 拆成"新月分区 + 新 pmax"。
+- 【数据】实测拆完后 `p202701` 排在 `pmax` 之前；再 `drop partition p202701` 可删除空分区（有数据时会连数据一起删）。
+
+### 第 7 步｜对现有分页查询的影响
+
+```text
+explain select ... from orders where user_id=1 order by create_time desc, id desc limit 0,10;
+
+partitions = 26 个全在
+type = ref  key = idx_user_create  Extra = Using where（没有 filesort）
+```
+
+- 【框架动作】每个分区各有一棵按 `(user_id, create_time)` 有序的索引，MySQL 对多个分区做有序归并，所以仍然不需要 filesort。
+- 【数据】浅页 `0.0005~0.0094s`；深页 `limit 79990,10` 实测 `0.31~0.32s`（分区前 `0.57~0.71s`）。
+- 注意：这是"每个分区内有序 + 归并"的结果，不代表分区表自动优化了排序；一旦查询跨分区且排序键不在索引里，仍会 filesort。
+
+### L8-4 实测
+
+| 查询 | 分区前 | 分区后 |
+|---|---|---|
+| `create_time` 单月范围 | 26 个分区不适用；`Handler_read_next=100009`，0.0285~0.0533s | `partitions=p202601`；`Handler_read_next=4251`，0.0021~0.0087s |
+| `where id=50015` | 主键一次定位 | 26 个分区各查一次主键，结果仍正确 |
+| 分页浅页 | 0.0004s 级 | 0.0005~0.0094s，无 filesort |
+| 分页深页 `offset=79990` | 0.57~0.71s | 0.31~0.32s |
+| 接口回归 | — | `page/getById/cursor` 全部 `code=0` |
+
+### L8-4 坑
+
+1. **唯一键必须包含分区列**：主键从 `(id)` 变成 `(id, create_time)`；这是分区表的硬性规则，不是可选优化。
+2. **按 id 查会打开所有分区**：分区裁剪只认 `create_time`，主键点查在分区表上反而多打开 25 个分区。
+3. **分区列不要套函数**：`date(create_time)=...` 会让裁剪失效。
+4. **`pmax` 只是兜底**：所有超范围数据都堆进 `pmax`，它的数据量会越来越大；要按月提前 `REORGANIZE` 建好下个月。
+5. **不能直接 `ADD PARTITION`**：`pmax` 是最后一个分区时，只能 `REORGANIZE pmax`。
+6. **`DROP PARTITION` 是删数据**，不是归档；要保留历史数据必须先导出或交换分区。
+7. **分区不是索引**：它解决的是"按时间范围只打开部分数据"和"按分区快速清理历史"，不替代联合索引；本例两者是叠加使用的。
+8. **分区表不支持外键**：本项目没有外键，所以不受影响；有外键的表要先去掉外键。
+9. **别用 `ALTER TABLE ... PARTITION BY` 原地改造大表**：会整表重建、耗时长且难回滚；本项目用"建新表 + 导数据 + rename"，失败可一条 rename 退回。
+10. **rename 后连接池不用重启**：表名没变，MyBatis 无感知；但正在执行的长事务可能短暂阻塞 rename，生产要在低峰做。
+
+### L8-4 断点验证与自测题
+
+| 停在哪 | 看什么 | 看到什么证明走对了 |
+|---|---|---|
+| MySQL：`show create table orders` | 末尾 | 出现 `PARTITION BY RANGE COLUMNS(create_time)` |
+| MySQL：`explain partitions` 时间范围 | `partitions` 列 | 只有 `p202601` |
+| MySQL：`explain partitions` 按 id | `partitions` 列 | 26 个分区全在 |
+| MySQL：`information_schema.partitions` | `partition_name` | `p202412`~`p202612` + `pmax` |
+| 网关接口 | `page/getById/cursor` | rename 后仍返回 `code=0` |
+
+### 自测题（不附答案）
+
+1. 为什么分区表的主键必须带上 `create_time`？不加会怎样？
+2. 按 `id` 查一条订单，分区表比普通表快还是慢？为什么？
+3. 已有 `pmax` 的情况下，怎么新增下个月分区？为什么不能直接 `ADD PARTITION`？

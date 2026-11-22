@@ -36,7 +36,7 @@ L8 不加新框架，只改 **SQL、索引、表结构**，把这三类症状逐
 | L8-0 | 前置体检：编译、中间件、9 行基线 | ✅ |
 | L8-1 | 造 10 万跨月数据 + `/order/page`、`/order/cursor` | ✅ |
 | L8-2 | 联合索引 `(user_id, create_time)`，EXPLAIN 前后对比 | ✅ |
-| L8-3 | 深翻页三版对比（limit / 延迟关联 / 游标） | 待做 |
+| L8-3 | 深翻页三版对比（limit / 延迟关联 / 游标） | ✅ |
 | L8-4 | 按月 RANGE 分区（`orders_p` + rename） | 待做 |
 | L8-5 | 总验收、收尾、提交 | 待做 |
 
@@ -495,3 +495,181 @@ id  select_type  table   partitions  type  possible_keys     key              ke
 1. 加了索引后为什么浅页快了、深页反而慢了？分别是什么 IO 模式？
 2. 为什么索引建 `(user_id, create_time)` 就能消掉 `filesort`，而不是必须把 `order by` 的列单独建索引？
 3. `EXPLAIN` 显示 `rows=49982`，但用户 1 实际有 80005 行，怎么解释这个差异？
+
+## 七、L8-3 深翻页三版对比
+
+**命令入场**
+
+```sql
+-- 统一取 offset=39990（第 4000 页，每页 10 条）
+A. select id, user_id, product_id, num, amount, create_time
+   from orders where user_id = 1
+   order by create_time desc, id desc limit 39990, 10;
+
+B. select o.id, o.user_id, o.product_id, o.num, o.amount, o.create_time
+   from orders o join (
+       select id from orders where user_id = 1
+       order by create_time desc, id desc limit 39990, 10
+   ) t on o.id = t.id
+   order by o.create_time desc, o.id desc;
+
+C. select id, user_id, product_id, num, amount, create_time
+   from orders where user_id = 1
+     and (create_time < '2025-11-30 14:52:30'
+          or (create_time = '2025-11-30 14:52:30' and id < 50015))
+   order by create_time desc, id desc limit 10;
+```
+
+对应的 HTTP 命令：
+
+```text
+A. GET http://localhost:9000/api/order/page?userId=1&page=4000&size=10
+C. GET http://localhost:9000/api/order/cursor?userId=1&size=10&lastCreateTime=2025-11-30T14:52:30&lastId=50015
+```
+
+**本步改动**
+
+| 文件 | 归属 | 作用 |
+|---|---|---|
+| `v1/docs/sql/L8/04-deep-page.sql` | 本项目 | 三版 SQL 与游标边界的取法 |
+| `OrderMapper.selectCursor` | 本项目，L8-1 已建 | C 版落点，本步只做对比不改代码 |
+
+> 本步 Java 零改动。A 走 `/order/page`，C 走 `/order/cursor`，B 只在 MySQL 客户端验证。
+
+**调用链（C 版）**
+
+| 顺序 | 谁 | 在哪 | 干了什么 |
+|---|---|---|---|
+| 1 | `OrderController.cursor` | 第 79-85 行 | 接收 `userId/lastCreateTime/lastId/size` |
+| 2 | `OrderServiceImpl.cursor` | 第 113-123 行 | 两个游标参数都不为空 → 走 `selectCursor` |
+| 3 | `OrderMapper.selectCursor` | 第 48-55 行 | `where user_id=? and (create_time<? or (create_time=? and id<?))` |
+| 4 | MySQL | — | 从 `(2025-11-30 14:52:30, 50015)` 位置直接反向读 10 条 |
+
+**数据编号**
+
+| 编号 | 数据 | 初始值 | 谁产生 |
+|---|---|---|---|
+| `[D1]` | 用户 id | `1` | 请求参数 |
+| `[D2]` | A/B 的 offset | `39990` | `OrderServiceImpl.page` 第 108 行 |
+| `[D3]` | C 的游标边界 | `create_time=2025-11-30 14:52:30, id=50015` | 上一页最后一条 |
+| `[D4]` | 三版实际 SQL | A/B/C 三条 | Mapper / MySQL 客户端 |
+| `[D5]` | 索引扫描量 | A `prev=39999`；B `prev=39999 + rnd=10`；C `prev=9` | `Handler_read_*` |
+| `[D6]` | SQL 耗时 | A `0.065~0.079s`；B `0.021~0.027s`；C `0.0003~0.0005s` | `SHOW PROFILES` |
+
+**四个结局（总览）**
+
+| 结局 | 方案 | 条件 | 结果 |
+|---|---|---|---|
+| ① 能翻但慢 | A：offset | 任意页 | 0.065~0.079s，页越深越慢 |
+| ② 快约 3 倍 | B：延迟关联 | 子查询能走覆盖索引 | 0.021~0.027s |
+| ③ 快约 200 倍 | C：游标 | 客户端带上一页边界 | 0.0003~0.0005s，与页深无关 |
+| ④ 三版一起退化 | 无索引 | 索引被删/条件缺最左列 | B 的子查询也变成全表扫，收益消失 |
+
+### 结局①逐步行进：A 版 offset 分页
+
+#### 第 1 步｜执行计划
+
+```text
+type=ref  key=idx_user_create  key_len=8  ref=const  rows=49982  Extra=Using where
+```
+
+- 【框架动作】同 L8-2：索引反向扫描，先跳过 39990 条，再取 10 条。
+- 【数据】`[D5] = Handler_read_prev=39999`，`Handler_read_rnd_next=0`。
+
+#### 第 2 步｜耗时
+
+- 【数据】`[D6] = 0.0792s / 0.0647s / 0.0735s`。
+- 成本与 `offset` 成正比：offset 79990 时实测 `0.57~0.71s`。
+
+### 结局②逐步行进：B 版延迟关联
+
+#### 第 1 步｜执行计划
+
+```text
+id=1 PRIMARY   table=<derived2>  type=ALL       key=NULL   rows=49982  Extra=Using temporary; Using filesort
+id=1 PRIMARY   table=o           type=eq_ref    key=PRIMARY rows=1     Extra=NULL
+id=2 DERIVED   table=orders      type=ref       key=idx_user_create    Extra=Using where; Using index
+```
+
+- 【你写的】子查询只 `select id`，列全在 `idx_user_create` 里，所以 `Extra=Using index`（覆盖索引，不回表）。
+- 【框架动作】先物化 10 个 id 到临时表，再用主键 `eq_ref` 回表 10 次。
+- 【数据】`[D5] = prev=39999`（子查询仍要跳过 4 万条索引项）+ `Handler_read_rnd=10`（回表 10 次）。
+- 注意：外层 `Using temporary; Using filesort` 排的是**临时表里的 10 行**，不是 L8-2 那种 8 万行 filesort，不能混为一谈。
+
+#### 第 2 步｜耗时
+
+- 【数据】`[D6] = 0.0271s / 0.0209s / 0.0206s`，约 A 的 1/3。
+
+#### 第 3 步｜为什么只快 3 倍而不是几十倍
+
+- 【数据】B 的子查询仍然 `prev=39999`：跳过 4 万条索引项这件事没有消失，只是把"取整行"限制在最后 10 条。
+- 结论：延迟关联优化的是**回表成本**，不优化**偏移量本身**；offset 越大它也会越慢，只是斜率更小。
+
+### 结局③逐步行进：C 版游标分页
+
+#### 第 1 步｜执行计划
+
+```text
+type=range  key=idx_user_create  key_len=21  rows=6  Extra=Using index condition
+```
+
+- 【数据】`key_len=21` = `user_id(8) + create_time(5) + id(8)`，说明三列都参与了范围定位。
+- 【框架动作】从 `(2025-11-30 14:52:30, 50015)` 这个位置直接反向读，不经过前面 4 万条。
+
+#### 第 2 步｜读行数
+
+- 【数据】`[D5] = Handler_read_key=2`、`Handler_read_prev=9`：读约 10 条就够，和页深无关。
+- 对比 A 的 `prev=39999`，这是数量级差异的来源。
+
+#### 第 3 步｜耗时
+
+- 【数据】`[D6] = 0.00049s / 0.00040s / 0.00028s`。
+
+#### 第 4 步｜代价
+
+- 只能"下一页"，不能跳页：没有上一页边界的绝对位置。
+- 必须带唯一稳定的排序键：本项目用 `(create_time, id)`，只传时间会在同秒重复时出错。
+- 翻页期间有新数据插入/删除，可能出现漏行或重复（不是快照读）。
+
+### L8-3 实测对比（offset=39990）
+
+| 版本 | EXPLAIN 关键列 | `Handler_read_prev` | `Handler_read_rnd` | SQL 耗时 |
+|---|---|---|---|---|
+| A offset | `ref / idx_user_create / Using where` | 39999 | 0 | 0.0647~0.0792s |
+| B 延迟关联 | 子查询 `ref / idx_user_create / Using index` | 39999 | 10 | 0.0206~0.0271s |
+| C 游标 | `range / idx_user_create / Using index condition` | 9 | 0 | 0.00028~0.00049s |
+
+网关 9000 端到端（curl，间隔 3 秒）：
+
+```text
+A /api/order/page?page=4000   0.0858 / 0.0650 / 0.0826s
+C /api/order/cursor          0.0319 / 0.0270 / 0.0176s
+```
+
+> 端到端差距只有 3 倍左右，因为网关验签、HTTP、JSON 序列化的固定开销约 20ms，把 SQL 层的 200 倍差距稀释了。面试时要说清"SQL 层"和"接口层"两个口径。
+
+### L8-3 坑
+
+1. **外层 `Using filesort` 不等于没优化**：B 版排的是 10 行临时表，要跟 L8-2 的 8 万行 filesort 区分开。
+2. **延迟关联不消除 offset**：它只减少回表，子查询仍要扫过 offset 条索引项。
+3. **游标分页不能跳页**：产品要求"跳到第 N 页"时不能用它，只能 offset 或额外维护页码映射。
+4. **游标必须传复合键**：只传 `create_time` 会在同秒多行时重复/漏行；本项目传 `(create_time, id)`。
+5. **翻页期间数据变化会漏/重**：游标不是快照，新增数据可能出现在已翻过的位置。
+6. **A 版接口仍暴露深页**：`/order/page` 没限制最大页码，前端传 `page=999999` 也只是返回空列表，但数据库仍要扫到尾；生产可加"最大可翻页数"或直接下线 offset 分页。
+7. **网关 order 路由限流 2/秒**：三次测量之间必须间隔 ≥3 秒，否则拿到 `4290`。
+
+### L8-3 断点验证与自测题
+
+| 停在哪 | 看什么 | 看到什么证明走对了 |
+|---|---|---|
+| `OrderServiceImpl.page` 第 108 行 | `offset` | `39990` |
+| `OrderServiceImpl.cursor` 第 115 行 | `lastCreateTime/lastId` | 都非空，走 `selectCursor` |
+| `OrderMapper.selectCursor` 执行时控制台 SQL | `where` 条件 | 含 `create_time < ? or (create_time = ? and id < ?)` |
+| MySQL：`explain` C 版 | `type / key_len` | `range` / `21` |
+| MySQL：`Handler_read_prev` | 三版对比 | 39999 / 39999 / 9 |
+
+### 自测题（不附答案）
+
+1. 延迟关联为什么只快了 3 倍，而游标分页能快 200 倍？两者分别消除了哪部分成本？
+2. B 版 EXPLAIN 里出现 `Using filesort`，为什么说它仍然比 A 好？
+3. 游标分页在什么业务场景下不能用？如果产品要求"跳页"怎么办？

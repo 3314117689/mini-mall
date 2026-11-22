@@ -38,7 +38,7 @@ L7 增加一个网关（`9000`）：
 | L7-1 | 新建 `mall-gateway`，三条路由打通 | ✅ |
 | L7-2 | `AuthGlobalFilter`：白名单 + 验签 + 注入身份头 | ✅ |
 | L7-3 | 服务改信任网关头，Feign 透传身份 | ✅ |
-| L7-4 | 网关限流 `RequestRateLimiter` | 未开始 |
+| L7-4 | 网关限流 `RequestRateLimiter` | ✅ |
 | L7-5 | CORS、错误统一、全链路验收、收尾 | 未开始 |
 
 ## 四、涉及文件与归属（L7-1）
@@ -718,3 +718,200 @@ public void apply(RequestTemplate template) {
 1. 网关已经注入了正确身份，为什么 Feign 调 user 还要再写一遍头？
 2. 为什么 `@RequireRole` 的校验不能上移到网关？
 3. 有人拿到服务端口后自己伪造 `X-Mall-User-Id`，网关的验签还能挡住吗？生产上怎么解决？
+
+---
+
+## 十二、L7-4 网关限流 RequestRateLimiter
+
+**命令入场**
+
+```text
+A. 连续 10 次  GET http://localhost:9000/api/product/1     （未登录）
+B. 连续 10 次  GET http://localhost:9000/api/order/1       （Authorization: Bearer <zhangsan>）
+```
+
+**本步改动**
+
+| 文件 | 归属 | 作用 |
+|---|---|---|
+| `pom.xml` | 本项目 | 加 `spring-boot-starter-data-redis-reactive` |
+| `application.yml` 第 9-13 行 | 本项目 | 配 Redis 地址（令牌桶存这里） |
+| `application.yml` 第 38-45、52-57 行 | 本项目 | 两条路由挂 `RequestRateLimiter` |
+| `RateLimitConfig` | 本项目，`mall-gateway/.../config/` | `KeyResolver`：登录按 userId，未登录按 IP |
+| `RateLimitResponseFilter` | 本项目，`mall-gateway/.../filter/` | 把限流器的空 429 改写成 `{"code":4290}` |
+| `RequestRateLimiterGatewayFilterFactory` | 框架：Spring Cloud Gateway | 内置限流路由过滤器 |
+| `RedisRateLimiter` | 框架：Spring Cloud Gateway | 用 Redis + Lua 执行令牌桶算法 |
+
+**令牌桶三个参数**
+
+| 参数 | 本步值 | 含义 |
+|---|---|---|
+| `replenishRate` | 2 | 每秒往桶里补 2 个令牌 |
+| `burstCapacity` | 5 | 桶最多攒 5 个令牌（瞬间并发上限） |
+| `requestedTokens` | 1 | 每个请求消耗 1 个令牌 |
+
+**调用链**
+
+| 顺序 | 谁 | 在哪 | 干了什么 |
+|---|---|---|---|
+| 1 | `AuthGlobalFilter` | order = -100 | 公开路径删身份头；受保护路径验签、写身份头 |
+| 2 | `RateLimitResponseFilter` | order = -90 | 给响应包一层装饰器，准备接住 429 |
+| 3 | `StripPrefix` | 路由 filters | 去掉 `/api` |
+| 4 | `RequestRateLimiter` | 路由 filters | 调 `KeyResolver` 得到 Key → 调 `RedisRateLimiter` 判断有没有令牌 |
+| 5 | `RedisRateLimiter` | 框架 | 执行 Lua：取桶 → 补令牌 → 扣 1 → 写回 Redis |
+| 6 | 下游 / `setComplete` | — | 有令牌继续转发；没令牌设 429 并结束响应 |
+| 7 | `RateLimitResponseFilter` 的装饰器 | 第 43-57 行 | 看到 429 → 改成 200，写 `{"code":4290}` |
+
+**数据编号**
+
+| 编号 | 数据 | 初始值 | 谁产生 |
+|---|---|---|---|
+| `[D1]` | 路由 id | `product-service` / `order-service` | 路由匹配 |
+| `[D2]` | 限流 Key | `ip:127.0.0.1` 或 `user:1` | `RateLimitConfig` |
+| `[D3]` | Redis 桶键 | `request_rate_limiter.{路由id}.{Key}.*` | `RedisRateLimiter` |
+| `[D4]` | 剩余令牌 | 0~5 | Redis Lua 计算 |
+| `[D5]` | 是否放行 | `true` / `false` | `RedisRateLimiter` |
+| `[D6]` | 浏览器响应 | 业务 JSON 或 `{"code":4290,...}` | 下游 / 装饰器 |
+
+**四个结局（总览）**
+
+| 结局 | 分岔点 | 条件 | 浏览器 |
+|---|---|---|---|
+| ① 有令牌 | `[D5] = true` | 桶里令牌 ≥ 1 | 正常转发，`code=0` |
+| ② 令牌不足 | `[D5] = false` | 桶里令牌 < 1 | `{"code":4290,"msg":"请求过于频繁，请稍后再试"}` |
+| ③ 等一会儿恢复 | Redis 补令牌 | 时间流逝，`replenishRate` 补齐 | 再次 `code=0` |
+| ④ Redis 不可用 | `RedisRateLimiter` 报错 | Redis 没起/断开 | 5xx（限流器无法判断） |
+
+### 结局①逐步行进：有令牌
+
+#### 第 1 步｜先鉴权，再限流
+
+- 【框架动作】GlobalFilter 按 `getOrder()` 排序：`AuthGlobalFilter(-100)` → `RateLimitResponseFilter(-90)` → 路由 filters（从 1 开始）。
+- 【数据】到限流这一步时，请求头已经带好 `X-Mall-User-Id`（受保护路径）或被清空（公开路径）。
+
+#### 第 2 步｜KeyResolver 算 Key
+
+```java
+// 文件：mall-gateway/src/main/java/com/mall/gateway/config/RateLimitConfig.java
+// 行号：26-36
+public KeyResolver userKeyResolver() {
+    return exchange -> {
+        String userId = exchange.getRequest().getHeaders().getFirst(AuthHeaders.USER_ID);
+        if (userId != null && !userId.isBlank()) {
+            return Mono.just("user:" + userId);
+        }
+        InetSocketAddress remote = exchange.getRequest().getRemoteAddress();
+        String ip = remote == null ? "unknown" : remote.getAddress().getHostAddress();
+        return Mono.just("ip:" + ip);
+    };
+}
+```
+
+- 【你写的】有 userId 用 `user:<id>`，没有就用 `ip:<地址>`。
+- 【数据】商品 GET 未登录 → `[D2] = ip:127.0.0.1`；order GET 带 zhangsan token → `[D2] = user:1`。
+
+#### 第 3 步｜Redis 令牌桶判定
+
+- 【你写的】路由上的 YAML 第 39-45 行把 `key-resolver` 指向 `#{@userKeyResolver}`，并给出三个参数。
+- 【框架动作】`RedisRateLimiter` 执行内置 Lua：
+  1. 读桶当前令牌数（没有就按满桶算）；
+  2. 按距离上次的时间 × `replenishRate` 补令牌，上限 `burstCapacity`；
+  3. 够 `requestedTokens` 就扣掉并返回放行，否则返回拒绝。
+- 【数据】`[D3]` 形如 `request_rate_limiter.product-service.ip:127.0.0.1.tokens`；`[D4]` 扣减后写回 Redis；`[D5] = true`。
+
+#### 第 4 步｜放行
+
+- 【框架动作】`chain.filter(exchange)` 继续走到下游，响应头会带 `X-RateLimit-Remaining`、`X-RateLimit-Replenish-Rate`、`X-RateLimit-Burst-Capacity`。
+- 【数据】浏览器收到商品/订单 JSON，`[D6].code = 0`。
+
+### 结局②逐步行进：令牌不足
+
+- 【框架动作】`RedisRateLimiter` 返回 `allowed=false`；`RequestRateLimiter` 把响应状态设为 429，然后调用 `setComplete()`，**不写响应体**。
+- 【数据】`[D5] = false`，`[D6]` 此时还没有内容。
+- 【你写的】`RateLimitResponseFilter` 的装饰器接住这次 `setComplete`：
+
+```java
+// 文件：mall-gateway/src/main/java/com/mall/gateway/filter/RateLimitResponseFilter.java
+// 行号：41-57
+ServerHttpResponseDecorator decorated = new ServerHttpResponseDecorator(exchange.getResponse()) {
+    @Override
+    public Mono<Void> setComplete() {
+        if (HttpStatus.TOO_MANY_REQUESTS.equals(getStatusCode())) {
+            setStatusCode(HttpStatus.OK);
+            getHeaders().setContentType(MediaType.APPLICATION_JSON);
+            try {
+                byte[] bytes = objectMapper.writeValueAsBytes(Result.fail(ErrorCode.FLOW_LIMITED));
+                DataBuffer buffer = bufferFactory().wrap(bytes);
+                return super.writeWith(Mono.just(buffer));
+            } catch (JsonProcessingException e) {
+                log.error("网关写限流响应失败", e);
+            }
+        }
+        return super.setComplete();
+    }
+};
+```
+
+- 【数据】状态从 429 改成 200；`[D6] = {"code":4290,"msg":"请求过于频繁，请稍后再试","data":null}`。
+- 为什么不能"限流后再补写响应"：`setComplete()` 已经把响应提交了，提交后再写会报错；必须在提交前拦截，所以用装饰器。
+
+### 结局③逐步行进：等一会儿恢复
+
+- 【框架动作】Redis 里的桶按 `replenishRate=2/秒` 自动补令牌，最多回到 `burstCapacity=5`。
+- 【数据】等待 3 秒后，桶里至少 5 个令牌，下一次请求 `[D5] = true`，`code=0`。
+- 注意：限流器不需要定时任务，"补令牌"是每次请求时按时间差算出来的。
+
+### 结局④逐步行进：Redis 不可用
+
+- 【框架动作】`RedisRateLimiter` 连不上 Redis，返回错误，网关无法判断是否放行。
+- 【数据】请求返回 5xx，而不是 4290；这类故障要靠监控发现，不能当成"被限流"。
+- 本地验证方式：停掉 Redis 后再请求 `/api/product/1`。
+
+### L7-4 实测
+
+```text
+配置：replenishRate=2，burstCapacity=5，requestedTokens=1
+
+1. 连续 10 次 GET /api/product/1（未登录，key=ip:127.0.0.1）
+   返回 code 序列: 0,0,0,0,0,0,4290,4290,4290,4290
+   成功=6 限流=4
+
+2. 等待 3 秒后再次请求
+   code=0
+
+3. 连续 10 次 GET /api/order/1（zhangsan，key=user:1）
+   返回 code 序列: 0,0,0,0,0,0,0,0,4290,4290
+   成功=8 限流=2
+
+4. 等待 3 秒后再次请求
+   code=0
+```
+
+> 为什么成功数大于 5：10 次请求不是同一毫秒发完的，请求本身要花时间，桶在这期间按 2/秒补了令牌。`burstCapacity` 限的是"瞬间最多攒多少"，不是"总共只能过多少"。
+
+### L7-4 坑
+
+1. **必须引 reactive 版 Redis**：网关是 WebFlux，用阻塞式 `spring-boot-starter-data-redis` 会破坏响应式链路；`RedisRateLimiter` 依赖 `ReactiveStringRedisTemplate`。
+2. **`key-resolver` 是 SpEL 引用 Bean**：写 `"#{@userKeyResolver}"`，不是类名、不是方法名；写错启动时报找不到 SpEL。
+3. **过滤器顺序不能反**：`AuthGlobalFilter(-100)` 必须在限流之前，否则 `X-Mall-User-Id` 还没写，所有已登录用户都会被算成 `ip:` 桶。
+4. **限流器默认返回空 429**：前端只认 body.code 会解析失败，所以加了 `RateLimitResponseFilter`；它必须排在路由过滤器之前才能包住响应。
+5. **按路由分桶**：Redis 键里带路由 id，`/api/product/**` 和 `/api/order/**` 是两个独立的桶，互不影响。
+6. **参数是演示值**：2/秒、5 突发对真实接口太低；生产按接口容量、机器数、Redis 性能调，并通过配置中心下发。
+7. **Redis 故障不是限流**：连不上 Redis 会 5xx；如果业务不能接受"限流器故障导致全站不可用"，需要降级策略（例如放行 + 告警）。
+8. **登录接口没有挂限流**：本步只给商品和订单路由配了限流；真实项目登录接口更该限流（防撞库），可作为扩展。
+
+### L7-4 断点验证与自测题
+
+| 停在哪 | 看什么 | 看到什么证明走对了 |
+|---|---|---|
+| `RateLimitConfig` 第 29 行 | `userId` | 未登录商品请求是 `null`；带 token 的订单请求是 `"1"` |
+| 第 35 行 | 返回的 `Mono` 值 | `ip:127.0.0.1` 或 `user:1` |
+| `RateLimitResponseFilter` 第 45 行 | `getStatusCode()` | 限流请求进来时是 `429` |
+| 第 49 行 | `bytes` 转字符串 | `{"code":4290,"msg":"请求过于频繁，请稍后再试","data":null}` |
+| Redis 客户端 | `KEYS request_rate_limiter.*` | 能看到按路由 id + Key 生成的桶键 |
+
+### 自测题（不附答案）
+
+1. `replenishRate=2`、`burstCapacity=5` 分别限制了什么？为什么连续 10 次请求可能通过 6 次而不是 5 次？
+2. 为什么限流的 Key 要优先用 userId，而不是全部按 IP？
+3. `RequestRateLimiter` 拒绝时已经调用了 `setComplete()`，为什么还能把响应体改成 `code=4290`？

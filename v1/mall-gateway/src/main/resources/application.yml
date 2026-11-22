@@ -6,6 +6,11 @@ spring:
   application:
     # 服务名：注册到 Nacos 的名字
     name: gateway-service
+  data:
+    redis:
+      # 网关限流的令牌桶存在 Redis（L7-4），与商品服务的缓存共用一个 Redis
+      host: 127.0.0.1
+      port: 6379
   cloud:
     nacos:
       discovery:
@@ -30,12 +35,26 @@ spring:
                 - Path=/api/product/**
               filters:
                 - StripPrefix=1
+                # 令牌桶限流：登录用户按 userId 分桶，未登录按 IP（见 RateLimitConfig）
+                - name: RequestRateLimiter
+                  args:
+                    key-resolver: "#{@userKeyResolver}"
+                    # 每秒补 2 个令牌，最多攒 5 个（演示值，生产按接口容量调）
+                    redis-rate-limiter.replenishRate: 2
+                    redis-rate-limiter.burstCapacity: 5
+                    redis-rate-limiter.requestedTokens: 1
             - id: order-service
               uri: lb://order-service
               predicates:
                 - Path=/api/order/**
               filters:
                 - StripPrefix=1
+                - name: RequestRateLimiter
+                  args:
+                    key-resolver: "#{@userKeyResolver}"
+                    redis-rate-limiter.replenishRate: 2
+                    redis-rate-limiter.burstCapacity: 5
+                    redis-rate-limiter.requestedTokens: 1
 
 # 网关验签（L7-2）：只填公钥端点，网关不存私钥、只验签
 mall:

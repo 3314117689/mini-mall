@@ -42,6 +42,13 @@
             <groupId>org.springframework.cloud</groupId>
             <artifactId>spring-cloud-starter-loadbalancer</artifactId>
         </dependency>
+
+        <!-- 响应式 Redis（L7-4）：网关的 RequestRateLimiter 用 Redis 存令牌桶，
+             必须用 reactive 版，不能用业务服务那种阻塞式 spring-boot-starter-data-redis -->
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-data-redis-reactive</artifactId>
+        </dependency>
     </dependencies>
 
     <build>

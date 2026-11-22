@@ -37,7 +37,7 @@ L10 不加业务功能，只做三件事：**在线文档、注解校验、异�
 | L10-2 | Swagger 指向网关 + Bearer 鉴权，调通下单/分页 | ✅ |
 | L10-3 | `GlobalExceptionHandler` 接管 JSR303 / 绑定 / 类型转换异常 | ✅ |
 | L10-4 | 登录/注册 DTO 校验，删 `UserServiceImpl`/`AuthServiceImpl` 手写 if | ✅ |
-| L10-5 | 商品与库存接口校验，`/product/stock/**` 文档隐藏 | ⬜ |
+| L10-5 | 商品与库存接口校验，`/product/stock/**` 文档隐藏 | ✅ |
 | L10-6 | 下单/分页/游标参数校验，删 `checkPageArgs` 与 `MAX_PAGE_SIZE` | ⬜ |
 | L10-7 | 总验收、文档、提交推送 | ⬜ |
 
@@ -363,4 +363,78 @@ POST http://localhost:8081/auth/login     {"username":"zhangsan","password":"123
 
 - 撤销：删除 `RegisterDTO`；`LoginDTO` 去掉校验注解；两个 Controller 去掉 `@Valid` 并改回收 `User`；`UserService.save` 改回 `Long save(User user)`；恢复 `UserServiceImpl.save` 与 `AuthServiceImpl.login` 的两段 if。
 - 影响：无表结构、无 Redis 变更；回滚后注册仍可传 `id/role`，坏参数只返回不带字段名的 1000。
+
+## 九、L10-5 商品与库存接口校验
+
+**命令入场**
+
+```text
+POST http://localhost:8082/product                  {}                                  → 1000
+POST http://localhost:8082/product                  {"name":"L10测试商品","price":0,...} → 1000
+POST http://localhost:8082/product                  {"name":"L10测试商品","price":9.90,"stock":10} → 0
+POST http://localhost:8082/product/stock/deduct     ?orderNo=L10TEST&productId=1&num=0  → 1000
+GET  http://localhost:8082/v3/api-docs/product-service                                  → 无 /product/stock
+```
+
+**结局表**
+
+| 结局 | 触发条件 | 现象 |
+|---|---|---|
+| ① 必填缺失 | `POST /product` body=`{}` | `code=1000`，name/price/stock 三个字段都点出来 |
+| ② 价格非法 | `price=0` | `code=1000`，`price: 必须大于 0` |
+| ③ 合法新增 | 三字段齐全 | `code=0`，返回自增 id |
+| ④ 库存参数非法 | `num=0` | `code=1000`，`num: 不能小于 1` |
+| ⑤ 缺内部参数 | 扣减不传 orderNo | `code=1000`，`缺少必填参数: orderNo` |
+| ⑥ 文档隐藏 | 打开 `/v3/api-docs/product-service` | 只剩 `/product`、`/product/{id}`，`/product/stock/**` 不出现 |
+
+### 第 1 步｜实体加约束
+
+[Product.java](file:///d:/bishe/workspace/gongju/eclipseworkspace/mini-mall/v1/mall-product/src/main/java/com/mall/product/entity/Product.java)：
+
+| 字段 | 注解 | message |
+|---|---|---|
+| `name` | `@NotBlank` + `@Size(max=100)` | `不能为空` / `长度不能超过 100 个字符` |
+| `price` | `@NotNull` + `@DecimalMin(value="0.00", inclusive=false)` | `不能为空` / `必须大于 0` |
+| `stock` | `@NotNull` + `@Min(0)` | `不能为空` / `不能小于 0` |
+
+- 【为什么 `id` 不加 `@NotNull`】新增时 id 由数据库自增，加了会挡住正常插入；更新时缺 id 会因"受影响 0 行"落到既有的 `1003 商品不存在`，不必为它拆 DTO 或引入校验分组。
+- 【为什么约束写在实体上】商品只有 `Product` 一个入参模型，新增/更新字段一致；L10-4 的用户之所以单独拆 `RegisterDTO`，是因为注册不能收 `id/role`。
+
+### 第 2 步｜Controller 加 `@Valid`
+
+[ProductController](file:///d:/bishe/workspace/gongju/eclipseworkspace/mini-mall/v1/mall-product/src/main/java/com/mall/product/controller/ProductController.java)：`save`、`update` 的 `@RequestBody Product` 前加 `@Valid`。`getById`/`deleteById` 不涉及请求体，不加。
+
+### 第 3 步｜内部接口文档隐藏 + 参数约束
+
+三个 `/product/stock/**` 方法加 `@Hidden`（`io.swagger.v3.oas.annotations.Hidden`），同时给 `@RequestParam` 加约束：
+
+- `orderNo`：`@NotBlank`
+- `productId`、`num`：`@NotNull` + `@Min(1)`
+
+- 【为什么不用类级 `@Validated`】Spring 6.1+ 对 Controller 方法参数上的约束有内建校验，失败抛 `HandlerMethodValidationException`，L10-3 已接住；`@Validated` 是 AOP 路线，这里没必要。
+- 【为什么 Service 的 `checkArgs` 保留】Controller 校验只覆盖 HTTP 入口；Service 还可能被内部代码调用，保留判空避免 NPE。它和注解不冲突，都是 1000。
+
+### 第 4 步｜验证
+
+直连 8082，写操作带三个身份头：
+
+- 【数据】`[D10]`：
+
+| 请求 | 返回 |
+|---|---|
+| `POST /product` body=`{}` | `{"code":1000,"msg":"price: 不能为空；name: 不能为空；stock: 不能为空"}` |
+| `POST /product` `price=0` | `{"code":1000,"msg":"price: 必须大于 0"}` |
+| `POST /product` `{"name":"L10测试商品","price":9.90,"stock":10}` | `{"code":0,"data":889,"msg":"ok"}` |
+| `GET /product/1` | `{"code":0,"data":{"id":1,"name":"测试商品","price":9.90,"stock":99}}` |
+| `POST /product/stock/deduct?orderNo=L10TEST&productId=1&num=0` | `{"code":1000,"msg":"num: 不能小于 1"}` |
+| `POST /product/stock/deduct?productId=1&num=1` | `{"code":1000,"msg":"缺少必填参数: orderNo"}` |
+
+- 【数据】`GET /v3/api-docs/product-service`：`paths` 只有 `/product`、`/product/{id}`；`Product` schema 带 `maxLength=100`、`minimum=0`。
+- 【数据】测试商品 id=`889`（名称 `L10测试商品`）保留，商品 1 库存仍为 `99`。
+
+### L10-5 回滚方案
+
+- 撤销：`Product` 去掉 5 个校验注解及 import；`ProductController.save/update` 去掉 `@Valid`；三个 stock 方法去掉 `@Hidden` 与参数约束。
+- 影响：无表结构、无 Redis 变更；回滚后坏参数只会被 Service 的 `checkArgs` 兜成不带字段名的 1000，文档里会重新出现 `/product/stock/**`。
+
 

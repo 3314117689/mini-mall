@@ -34,7 +34,7 @@ L10 不加业务功能，只做三件事：**在线文档、注解校验、异�
 |---|---|---|
 | L10-0 | 基线：编译、无效参数当前响应 | ✅ |
 | L10-1 | 接入 SpringDoc（依赖/分组/prod 开关），三个 Swagger UI 可打开 | ✅ |
-| L10-2 | Swagger 指向网关 + Bearer 鉴权，调通下单/分页 | ⬜ |
+| L10-2 | Swagger 指向网关 + Bearer 鉴权，调通下单/分页 | ✅ |
 | L10-3 | `GlobalExceptionHandler` 接管 JSR303 / 绑定 / 类型转换异常 | ⬜ |
 | L10-4 | 登录/注册 DTO 校验，删 `UserServiceImpl`/`AuthServiceImpl` 手写 if | ⬜ |
 | L10-5 | 商品与库存接口校验，`/product/stock/**` 文档隐藏 | ⬜ |
@@ -182,3 +182,73 @@ foreach ($p in 8081,8082,8083) { curl.exe -s -o NUL -w "%{http_code}" "http://lo
 - 撤销：删除四个 pom 中新增的依赖节点与父 pom 的 `springdoc.version`/`dependencyManagement`；删除三个 `OpenApiConfig`、三个 `application-prod.yml`、三个 `application.yml` 的 `springdoc` 段。
 - 影响：无数据库、Redis、Nacos 变更；`mvn -q install -DskipTests` 后即回到 L9 行为。
 - 现存接口路径不变，直连 8081/8082/8083 的测试方式不受影响（`/v3/api-docs`、`/swagger-ui/**` 是新增路径）。
+
+## 六、L10-2 Swagger 指向网关 + Bearer
+
+**为什么必须指向 9000**：L7-3 之后，order/user 直连只认 `X-Mall-User-Id/Username/Role` 三个头，**不再验 Bearer**；Bearer 只在网关 9000 被验，验完由网关写身份头转发。所以 Swagger 的 `servers` 只能是 `http://localhost:9000/api`，否则页面里填了 token 也会在下游拿到 4010。
+
+**命令入场**
+
+```text
+① POST http://localhost:9000/api/auth/login   {"username":"zhangsan","password":"123456"}
+② POST http://localhost:9000/api/order/create  Authorization: Bearer <①的 token>  {"productId":1,"num":1}
+③ GET  http://localhost:9000/api/order/page?userId=1&page=1&size=3  Authorization: Bearer <①的 token>
+```
+
+**结局表**
+
+| 结局 | 触发条件 | 数据 |
+|---|---|---|
+| ① 登录成功 | 用户名密码正确 | `code=0`，`data.token` 501 字符，`expiresIn=7200` |
+| ② 下单成功 | Bearer 有效 + 商品存在 + 库存够 | `code=0`，`data=100157` |
+| ③ 未填 token | 没点 Authorize 就调受保护接口 | 网关直接返回 `{"code":4010,"data":null,"msg":"未登录，请先登录"}` |
+| ④ token 无效/过期 | 乱填或超过 2 小时 | `{"code":4011,...}`，网关不转发 |
+
+### 第 1 步｜OpenApiConfig 补 servers 与安全方案
+
+三个 `OpenApiConfig` 在 `Info` 之后追加：
+
+```java
+.servers(List.of(new Server()
+        .url("http://localhost:9000/api")
+        .description("经网关：统一验 Bearer token")))
+.components(new Components().addSecuritySchemes(BEARER_AUTH,
+        new SecurityScheme()
+                .type(SecurityScheme.Type.HTTP)
+                .scheme("bearer")
+                .bearerFormat("JWT")))
+```
+
+- `BEARER_AUTH = "bearerAuth"` 是常量，Controller 的 `@SecurityRequirement` 直接引用，避免两处字符串写得不一致。
+- 【数据】`GET /v3/api-docs/order-service` → `servers[0].url = http://localhost:9000/api`，`components.securitySchemes.bearerAuth = {type: http, scheme: bearer, bearerFormat: JWT}`。
+
+### 第 2 步｜Controller 标注
+
+- [OrderController](file:///d:/bishe/workspace/gongju/eclipseworkspace/mini-mall/v1/mall-order/src/main/java/com/mall/order/controller/OrderController.java#L29-L31)：类上 `@Tag(name="订单服务")` + `@SecurityRequirement(name=OpenApiConfig.BEARER_AUTH)`，8 个方法各一个 `@Operation(summary=...)`。
+- [UserController](file:///d:/bishe/workspace/gongju/eclipseworkspace/mini-mall/v1/mall-user/src/main/java/com/mall/user/controller/UserController.java#L27-L29)：类上 `@Tag` + `@SecurityRequirement`（`/user/**` 全部要登录）。
+- [AuthController](file:///d:/bishe/workspace/gongju/eclipseworkspace/mini-mall/v1/mall-user/src/main/java/com/mall/user/controller/AuthController.java#L33-L34)：只加 `@Tag(name="认证")`，登录/注册/JWKS **不加** `@SecurityRequirement`（网关白名单）。
+- [ProductController](file:///d:/bishe/workspace/gongju/eclipseworkspace/mini-mall/v1/mall-product/src/main/java/com/mall/product/controller/ProductController.java#L26-L27)：类上只加 `@Tag`；`GET /product/{id}` 公开，`save/update/delete` 与 `/stock/**` 逐个方法加 `@SecurityRequirement`（网关只放行商品 GET/HEAD）。
+
+- 【数据】`[D6]`：order 文档里 `/order/create`、`/order/page` 的 `security` 都是 `{"bearerAuth":[]}`；user 文档里 `/auth/login` 的 `security` 为 `null`（公开）。
+
+### 第 3 步｜页面操作与验证
+
+1. 打开 `http://localhost:8081/swagger-ui/index.html`，`POST /auth/login` 填 `{"username":"zhangsan","password":"123456"}`，复制 `data.token`；
+2. 打开 `http://localhost:8083/swagger-ui/index.html`，点右上角 **Authorize**，粘贴 token（不用手写 `Bearer ` 前缀，页面会加）；
+3. 调 `POST /order/create`，body `{"productId":1,"num":1}`；再调 `GET /order/page`，`userId=1&page=1&size=3`。
+
+- 【数据】`[D7]`：
+
+| 请求 | 结果 |
+|---|---|
+| 登录 | `code=0`，token 长度 `501` |
+| 下单 | `code=0`，订单 id=`100157` |
+| 分页 | `code=0`，返回 3 条，首条 `id=100007, userId=1, amount=29.70`（L8 造的历史数据，`orderNo=null`） |
+| 库存 | 下单前 `100` → 下单后 `99` |
+
+- 说明：历史 10 万条是 L8 造的，没有 `order_no`；L9 之后新下的单才有订单号。测试订单不清理，记录在此。
+
+### L10-2 回滚方案
+
+- 撤销：三个 `OpenApiConfig` 去掉 `.servers(...)` 与 `.components(...)`，Controller 去掉 `@Tag/@Operation/@SecurityRequirement` 及其 import。
+- 影响：只影响文档元数据，接口行为、网关鉴权、直连测试方式都不变。

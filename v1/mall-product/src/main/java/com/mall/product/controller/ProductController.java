@@ -13,11 +13,17 @@ import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.bind.annotation.RestController;
 
 import com.mall.common.result.Result;
+import com.mall.product.config.OpenApiConfig;
 import com.mall.product.dto.DeductStatusDTO;
 import com.mall.product.entity.Product;
 import com.mall.product.service.ProductService;
 import com.mall.product.service.StockService;
 
+import io.swagger.v3.oas.annotations.Operation;
+import io.swagger.v3.oas.annotations.security.SecurityRequirement;
+import io.swagger.v3.oas.annotations.tags.Tag;
+
+@Tag(name = "商品服务", description = "商品增删改查与库存扣减/回补；查询公开，写操作需要 Bearer token")
 @RestController
 @RequestMapping("/product")
 public class ProductController {
@@ -42,6 +48,7 @@ public class ProductController {
 	@Value("${mall.product.deduct-slow-ms:0}")
 	private long deductSlowMs;
 
+	@Operation(summary = "按 id 查询商品", description = "公开接口，不需要 token")
 	@GetMapping("/{id}")
 	public Result<Product> getById(@PathVariable Long id) throws InterruptedException {
 		if (slowMs > 0) {
@@ -51,17 +58,23 @@ public class ProductController {
 	}
 
 	/** 新增：参数从请求体 JSON 来，用 @RequestBody 接收（和查询的 @PathVariable 不同） */
+	@Operation(summary = "新增商品")
+	@SecurityRequirement(name = OpenApiConfig.BEARER_AUTH)
 	@PostMapping
 	public Result<Long> save(@RequestBody Product product) {
 		return Result.ok(productService.save(product));
 	}
 
+	@Operation(summary = "更新商品")
+	@SecurityRequirement(name = OpenApiConfig.BEARER_AUTH)
 	@PutMapping
 	public Result<Void> update(@RequestBody Product product) {
 		productService.update(product);
 		return Result.ok();
 	}
 
+	@Operation(summary = "删除商品")
+	@SecurityRequirement(name = OpenApiConfig.BEARER_AUTH)
 	@DeleteMapping("/{id}")
 	public Result<Void> deleteById(@PathVariable Long id) {
 		productService.deleteById(id);
@@ -73,6 +86,8 @@ public class ProductController {
 	 * L9 修复：带 orderNo 做幂等键，同一订单重试不会重复扣。
 	 * POST /product/stock/deduct?orderNo=ORD...&productId=1&num=1
 	 */
+	@Operation(summary = "扣减库存（内部接口）", description = "order 服务 Feign 调用，orderNo 是幂等键")
+	@SecurityRequirement(name = OpenApiConfig.BEARER_AUTH)
 	@PostMapping("/stock/deduct")
 	public Result<Integer> deductStock(@RequestParam String orderNo,
 			@RequestParam Long productId,
@@ -85,6 +100,8 @@ public class ProductController {
 	}
 
 	/** L9-4：回补库存，下单失败时由 order 服务调用；L9 修复后同样按 orderNo 幂等 */
+	@Operation(summary = "回补库存（内部接口）", description = "order 服务 Feign 调用，orderNo 是幂等键")
+	@SecurityRequirement(name = OpenApiConfig.BEARER_AUTH)
 	@PostMapping("/stock/release")
 	public Result<Void> releaseStock(@RequestParam String orderNo,
 			@RequestParam Long productId,
@@ -94,6 +111,8 @@ public class ProductController {
 	}
 
 	/** L9 修复：按订单号查询扣减状态，order 超时后用它确认到底扣没扣 */
+	@Operation(summary = "查询扣减状态（内部接口）", description = "order 服务 Feign 调用")
+	@SecurityRequirement(name = OpenApiConfig.BEARER_AUTH)
 	@GetMapping("/stock/deduct/status")
 	public Result<DeductStatusDTO> deductStatus(@RequestParam String orderNo) {
 		return Result.ok(stockService.status(orderNo));

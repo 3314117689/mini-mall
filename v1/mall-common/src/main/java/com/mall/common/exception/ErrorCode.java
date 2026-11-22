@@ -53,6 +53,9 @@ public enum ErrorCode {
     /** 商品服务不可用（Sentinel 降级：调用不通时由 fallback 抛出，L4） */
     PRODUCT_SERVICE_UNAVAILABLE(2003, "商品服务不可用，请稍后重试"),
 
+    /** 下单远程调用超时（L9-2）：CompletableFuture.orTimeout 到点仍未等齐 */
+    REMOTE_TIMEOUT(2004, "远程调用超时，请稍后重试"),
+
     /** Sentinel 限流/熔断拦截（L4）：触发规则的请求由拦截处理器统一返回此文案 */
     FLOW_LIMITED(4290, "请求过于频繁，请稍后再试"),
 

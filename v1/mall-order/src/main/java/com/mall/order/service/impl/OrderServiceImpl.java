@@ -3,9 +3,13 @@ package com.mall.order.service.impl;
 import java.math.BigDecimal;
 import java.time.LocalDateTime;
 import java.util.List;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.CompletionException;
 import java.util.concurrent.ExecutionException;
-import java.util.concurrent.Future;
 import java.util.concurrent.RejectedExecutionException;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.TimeoutException;
+import java.util.function.Supplier;
 
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Qualifier;
@@ -33,6 +37,9 @@ public class OrderServiceImpl implements OrderService {
 
 	/** L8：单页上限，防止一次拉太多把接口和内存打满 */
 	private static final int MAX_PAGE_SIZE = 100;
+
+	/** L9-2：两次并行远程调用的总等待上限；Feign 读超时是 3 秒，这里 2 秒先兜底 */
+	private static final long REMOTE_TIMEOUT_MS = 2000;
 
 	@Autowired
 	private OrderMapper orderMapper;
@@ -74,8 +81,9 @@ public class OrderServiceImpl implements OrderService {
 	 * 4. 服务端用 单价 × 数量 算金额，客户端传的金额一律不信任；
 	 * 5. 落库并返回订单 id。
 	 *
-	 * L9-1 改动：第 2、3 步整体提交到 remoteExecutor，慢下游不再一直占用 Tomcat 线程；
-	 * 队列满时由拒绝策略抛异常，这里翻译成 4291。并行编排在 L9-2 再做。
+	 * L9-1 改动：第 2、3 步交给 remoteExecutor，队列满时翻译成 4291。
+	 * L9-2 改动：第 2、3 步拆成两个 CompletableFuture 并行，thenCombine 等齐，
+	 * orTimeout 2 秒超时返回 2004（它只让等待方提前结束，不取消底层任务）。
 	 */
 	@Override
 	public Long create(Long userId, OrderCreateDTO dto) {
@@ -87,20 +95,19 @@ public class OrderServiceImpl implements OrderService {
 		// FeignAuthInterceptor 从 UserContext 取身份头；换线程后 ThreadLocal 为空，
 		// 必须把当前请求的身份快照带进任务，任务结束再 clear（线程会被复用）。
 		LoginUser loginUser = UserContext.get();
-		Future<RemoteSnapshot> future;
+		CompletableFuture<RemoteSnapshot> future;
 		try {
-			future = remoteExecutor.submit(() -> {
-				log.info("远程调用任务开始, thread={}, userId={}",
-						Thread.currentThread().getName(), userId);
-				UserContext.set(loginUser);
-				try {
-					UserDTO user = remoteService.getUser(userId);
-					ProductDTO product = remoteService.getProduct(dto.getProductId());
-					return new RemoteSnapshot(user, product);
-				} finally {
-					UserContext.clear();
-				}
-			});
+			CompletableFuture<UserDTO> userFuture = CompletableFuture.supplyAsync(() -> {
+				log.info("并行调用用户服务开始, thread={}", Thread.currentThread().getName());
+				return withUserContext(loginUser, () -> remoteService.getUser(userId));
+			}, remoteExecutor);
+			CompletableFuture<ProductDTO> productFuture = CompletableFuture.supplyAsync(() -> {
+				log.info("并行调用商品服务开始, thread={}", Thread.currentThread().getName());
+				return withUserContext(loginUser, () -> remoteService.getProduct(dto.getProductId()));
+			}, remoteExecutor);
+			// 两个调用互不依赖：谁先回都行，等齐后再组装；超时只影响等待方
+			future = userFuture.thenCombine(productFuture, RemoteSnapshot::new)
+					.orTimeout(REMOTE_TIMEOUT_MS, TimeUnit.MILLISECONDS);
 		} catch (RejectedExecutionException e) {
 			log.warn("线程池拒绝下单任务, userId={}, productId={}", userId, dto.getProductId());
 			throw new BizException(ErrorCode.POOL_BUSY);
@@ -114,10 +121,15 @@ public class OrderServiceImpl implements OrderService {
 			Thread.currentThread().interrupt();
 			throw new BizException(ErrorCode.SYSTEM_ERROR);
 		} catch (ExecutionException e) {
-			Throwable cause = e.getCause();
+			Throwable cause = unwrap(e.getCause());
 			// 业务失败（用户/商品不存在、Sentinel 降级文案）原样放行
 			if (cause instanceof BizException bizException) {
 				throw bizException;
+			}
+			if (cause instanceof TimeoutException) {
+				log.warn("下单远程调用超时, userId={}, productId={}, timeoutMs={}",
+						userId, dto.getProductId(), REMOTE_TIMEOUT_MS);
+				throw new BizException(ErrorCode.REMOTE_TIMEOUT);
 			}
 			log.error("下单远程调用失败, userId={}, productId={}", userId, dto.getProductId(), cause);
 			throw new BizException(ErrorCode.SYSTEM_ERROR);
@@ -183,5 +195,25 @@ public class OrderServiceImpl implements OrderService {
 
 	/** 线程池任务里两次远程调用的返回值，用 record 一次带回主线程 */
 	private record RemoteSnapshot(UserDTO user, ProductDTO product) {
+	}
+
+	/** 把当前请求的身份带进异步线程；执行完必须清理，否则线程复用会串号 */
+	private <T> T withUserContext(LoginUser loginUser, Supplier<T> action) {
+		UserContext.set(loginUser);
+		try {
+			return action.get();
+		} finally {
+			UserContext.clear();
+		}
+	}
+
+	/** CompletableFuture 会把异常包成 CompletionException，逐层剥到真正的业务异常 */
+	private Throwable unwrap(Throwable throwable) {
+		Throwable current = throwable;
+		while ((current instanceof CompletionException || current instanceof ExecutionException)
+				&& current.getCause() != null) {
+			current = current.getCause();
+		}
+		return current;
 	}
 }

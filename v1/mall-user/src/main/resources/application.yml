@@ -28,6 +28,14 @@ spring:
       # 热部署开关，生产环境打包时该依赖自动失效
       enabled: true
 
+# JWT（L6）：私钥只在 user 服务，其他服务通过 GET /auth/jwks 取公钥验签
+# kid 是密钥编号，换密钥时改它，验签方按 kid 选公钥
+mall:
+  jwt:
+    kid: mall-l6-dev
+    private-key: classpath:keys/jwt-private.pem
+    public-key: classpath:keys/jwt-public.pem
+
 mybatis:
   configuration:
     # 驼峰映射：数据库 create_time 自动映射实体 createTime

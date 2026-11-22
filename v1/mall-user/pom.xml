@@ -41,6 +41,26 @@
             <version>${spring-cloud-alibaba.version}</version>
         </dependency>
 
+        <!-- JWT（L6）：只有 mall-user 需要签名，所以这一组只加在这里。
+             jjwt-api 编译期用；jjwt-impl 和 jjwt-jackson 是运行时真正干活的实现 -->
+        <dependency>
+            <groupId>io.jsonwebtoken</groupId>
+            <artifactId>jjwt-api</artifactId>
+            <version>${jjwt.version}</version>
+        </dependency>
+        <dependency>
+            <groupId>io.jsonwebtoken</groupId>
+            <artifactId>jjwt-impl</artifactId>
+            <version>${jjwt.version}</version>
+            <scope>runtime</scope>
+        </dependency>
+        <dependency>
+            <groupId>io.jsonwebtoken</groupId>
+            <artifactId>jjwt-jackson</artifactId>
+            <version>${jjwt.version}</version>
+            <scope>runtime</scope>
+        </dependency>
+
         <!-- MyBatis：数据库访问（版本由父工程仲裁，此处不写） -->
         <dependency>
             <groupId>org.mybatis.spring.boot</groupId>

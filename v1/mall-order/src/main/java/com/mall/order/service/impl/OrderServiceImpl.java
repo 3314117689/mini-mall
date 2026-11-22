@@ -38,9 +38,6 @@ import lombok.extern.slf4j.Slf4j;
 @Service
 public class OrderServiceImpl implements OrderService {
 
-	/** L8：单页上限，防止一次拉太多把接口和内存打满 */
-	private static final int MAX_PAGE_SIZE = 100;
-
 	/** L9-2：两次并行远程调用的总等待上限；Feign 读超时是 3 秒，这里 2 秒先兜底 */
 	private static final long REMOTE_TIMEOUT_MS = 2000;
 
@@ -98,9 +95,7 @@ public class OrderServiceImpl implements OrderService {
 	 */
 	@Override
 	public Long create(Long userId, OrderCreateDTO dto) {
-		if (dto.getProductId() == null || dto.getNum() == null || dto.getNum() <= 0) {
-			throw new BizException(ErrorCode.PARAM_ERROR);
-		}
+		// L10-6：productId/num 是否为空、num 下限已由 Controller 上的 @Valid + 注解拦住
 		log.info("下单, userId={}, productId={}, num={}", userId, dto.getProductId(), dto.getNum());
 
 		// FeignAuthInterceptor 从 UserContext 取身份头；换线程后 ThreadLocal 为空，
@@ -200,7 +195,6 @@ public class OrderServiceImpl implements OrderService {
 
 	@Override
 	public List<Order> page(Long userId, int page, int size) {
-		checkPageArgs(userId, page, size);
 		// offset 分页的代价就在这里：page 越深，数据库要跳过的行越多
 		int offset = (page - 1) * size;
 		log.info("分页查询订单, userId={}, page={}, size={}, offset={}", userId, page, size, offset);
@@ -213,7 +207,6 @@ public class OrderServiceImpl implements OrderService {
 			// 第一页没有游标，等价于 offset=0
 			return page(userId, 1, size);
 		}
-		checkPageArgs(userId, 1, size);
 		log.info("游标查询订单, userId={}, lastCreateTime={}, lastId={}, size={}",
 				userId, lastCreateTime, lastId, size);
 		return orderMapper.selectCursor(userId, lastCreateTime, lastId, size);
@@ -267,13 +260,6 @@ public class OrderServiceImpl implements OrderService {
 	@Override
 	public boolean replayCompensate(String orderNo) {
 		return compensateService.replay(orderNo);
-	}
-
-	/** 分页参数统一校验，page 从 1 开始 */
-	private void checkPageArgs(Long userId, int page, int size) {
-		if (userId == null || page < 1 || size < 1 || size > MAX_PAGE_SIZE) {
-			throw new BizException(ErrorCode.PARAM_ERROR);
-		}
 	}
 
 	/** 线程池任务里两次远程调用的返回值，用 record 一次带回主线程 */

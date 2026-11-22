@@ -25,12 +25,20 @@ import com.mall.order.service.OrderService;
 import io.swagger.v3.oas.annotations.Operation;
 import io.swagger.v3.oas.annotations.security.SecurityRequirement;
 import io.swagger.v3.oas.annotations.tags.Tag;
+import jakarta.validation.Valid;
+import jakarta.validation.constraints.Max;
+import jakarta.validation.constraints.Min;
+import jakarta.validation.constraints.NotBlank;
+import jakarta.validation.constraints.NotNull;
 
 @Tag(name = "订单服务", description = "下单与订单查询，全部接口需要 Bearer token")
 @SecurityRequirement(name = OpenApiConfig.BEARER_AUTH)
 @RestController
 @RequestMapping("/order")
 public class OrderController {
+
+	/** 单页上限，方法参数注解与 Service 共用同一个值，避免两边改漏 */
+	private static final int MAX_PAGE_SIZE = 100;
 
 	@Autowired
 	private OrderService orderService;
@@ -54,7 +62,7 @@ public class OrderController {
 	 */
 	@Operation(summary = "下单", description = "userId 从 token 解析，金额由服务端计算")
 	@PostMapping("/create")
-	public Result<Long> create(@RequestBody OrderCreateDTO dto, @CurrentUser Long userId) {
+	public Result<Long> create(@Valid @RequestBody OrderCreateDTO dto, @CurrentUser Long userId) {
 		return Result.ok(orderService.create(userId, dto));
 	}
 
@@ -78,9 +86,11 @@ public class OrderController {
 	 */
 	@Operation(summary = "订单分页（offset）", description = "page 从 1 开始，size 上限 100")
 	@GetMapping("/page")
-	public Result<List<Order>> page(@RequestParam Long userId,
-			@RequestParam(defaultValue = "1") int page,
-			@RequestParam(defaultValue = "10") int size) {
+	public Result<List<Order>> page(
+			@RequestParam @NotNull(message = "不能为空") @Min(value = 1, message = "不能小于 1") Long userId,
+			@RequestParam(defaultValue = "1") @Min(value = 1, message = "不能小于 1") int page,
+			@RequestParam(defaultValue = "10") @Min(value = 1, message = "不能小于 1")
+			@Max(value = MAX_PAGE_SIZE, message = "不能大于 100") int size) {
 		return Result.ok(orderService.page(userId, page, size));
 	}
 
@@ -91,10 +101,12 @@ public class OrderController {
 	 */
 	@Operation(summary = "订单游标分页", description = "第一页不传 lastCreateTime/lastId")
 	@GetMapping("/cursor")
-	public Result<List<Order>> cursor(@RequestParam Long userId,
+	public Result<List<Order>> cursor(
+			@RequestParam @NotNull(message = "不能为空") @Min(value = 1, message = "不能小于 1") Long userId,
 			@RequestParam(required = false) @DateTimeFormat(iso = DateTimeFormat.ISO.DATE_TIME) LocalDateTime lastCreateTime,
-			@RequestParam(required = false) Long lastId,
-			@RequestParam(defaultValue = "10") int size) {
+			@RequestParam(required = false) @Min(value = 1, message = "不能小于 1") Long lastId,
+			@RequestParam(defaultValue = "10") @Min(value = 1, message = "不能小于 1")
+			@Max(value = MAX_PAGE_SIZE, message = "不能大于 100") int size) {
 		return Result.ok(orderService.cursor(userId, lastCreateTime, lastId, size));
 	}
 
@@ -104,7 +116,8 @@ public class OrderController {
 	 */
 	@Operation(summary = "人工重放库存补偿任务", description = "MANUAL → PENDING 并立即执行一次")
 	@PostMapping("/compensate/replay")
-	public Result<Boolean> replayCompensate(@RequestParam String orderNo) {
+	public Result<Boolean> replayCompensate(
+			@RequestParam @NotBlank(message = "不能为空") String orderNo) {
 		return Result.ok(orderService.replayCompensate(orderNo));
 	}
 }

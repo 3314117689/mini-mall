@@ -38,7 +38,7 @@ L10 不加业务功能，只做三件事：**在线文档、注解校验、异�
 | L10-3 | `GlobalExceptionHandler` 接管 JSR303 / 绑定 / 类型转换异常 | ✅ |
 | L10-4 | 登录/注册 DTO 校验，删 `UserServiceImpl`/`AuthServiceImpl` 手写 if | ✅ |
 | L10-5 | 商品与库存接口校验，`/product/stock/**` 文档隐藏 | ✅ |
-| L10-6 | 下单/分页/游标参数校验，删 `checkPageArgs` 与 `MAX_PAGE_SIZE` | ⬜ |
+| L10-6 | 下单/分页/游标参数校验，删 `checkPageArgs` 与 `MAX_PAGE_SIZE` | ✅ |
 | L10-7 | 总验收、文档、提交推送 | ⬜ |
 
 ## 四、L10-0 基线体检
@@ -436,5 +436,102 @@ GET  http://localhost:8082/v3/api-docs/product-service                          
 
 - 撤销：`Product` 去掉 5 个校验注解及 import；`ProductController.save/update` 去掉 `@Valid`；三个 stock 方法去掉 `@Hidden` 与参数约束。
 - 影响：无表结构、无 Redis 变更；回滚后坏参数只会被 Service 的 `checkArgs` 兜成不带字段名的 1000，文档里会重新出现 `/product/stock/**`。
+
+## 十、L10-6 下单/分页/游标参数校验
+
+**命令入场**
+
+```text
+GET  http://localhost:8083/order/page?userId=1&page=0&size=10
+GET  http://localhost:8083/order/page?userId=1&page=1&size=101
+GET  http://localhost:8083/order/cursor?userId=1&size=0
+POST http://localhost:8083/order/create  {}
+POST http://localhost:8083/order/create  {"productId":1,"num":0}
+POST http://localhost:8083/order/create  {"productId":1,"num":1}
+```
+
+**结局表**
+
+| 结局 | 触发条件 | 现象 |
+|---|---|---|
+| ① 页码越界 | `page=0` | `code=1000`，`page: 不能小于 1` |
+| ② 单页过大 | `size=101` | `code=1000`，`size: 不能大于 100` |
+| ③ 游标 size 非法 | `size=0` | `code=1000`，`size: 不能小于 1` |
+| ④ 下单缺字段 | body=`{}` | `code=1000`，productId/num 都点出来 |
+| ⑤ 数量非法 | `num=0` | `code=1000`，`num: 不能小于 1` |
+| ⑥ 正常下单 | `{"productId":1,"num":1}` | `code=0`，返回订单 id，库存真实扣减 |
+
+### 第 1 步｜OrderCreateDTO 加约束
+
+[OrderCreateDTO.java](file:///d:/bishe/workspace/gongju/eclipseworkspace/mini-mall/v1/mall-order/src/main/java/com/mall/order/dto/OrderCreateDTO.java)：
+
+| 字段 | 注解 | message |
+|---|---|---|
+| `productId` | `@NotNull` + `@Min(1)` | `不能为空` / `不能小于 1` |
+| `num` | `@NotNull` + `@Min(1)` | `不能为空` / `不能小于 1` |
+
+### 第 2 步｜Controller 参数注解
+
+[OrderController](file:///d:/bishe/workspace/gongju/eclipseworkspace/mini-mall/v1/mall-order/src/main/java/com/mall/order/controller/OrderController.java)：
+
+- `create`：`@Valid @RequestBody OrderCreateDTO`；
+- `page`：`userId @NotNull @Min(1)`，`page @Min(1)`，`size @Min(1) @Max(MAX_PAGE_SIZE)`；
+- `cursor`：`userId` 同上，`lastId @Min(1)`（可选参数，不传不校验），`size` 同上；
+- `replayCompensate`：`orderNo @NotBlank`；
+- `MAX_PAGE_SIZE = 100` 从 Service 搬到 Controller，注解的 `@Max` 直接引用它。
+
+### 第 3 步｜Service 删重复校验
+
+[OrderServiceImpl](file:///d:/bishe/workspace/gongju/eclipseworkspace/mini-mall/v1/mall-order/src/main/java/com/mall/order/service/impl/OrderServiceImpl.java)：
+
+- `create` 删掉 `dto.getProductId() == null || dto.getNum() == null || dto.getNum() <= 0`；
+- `page`/`cursor` 删掉 `checkPageArgs(...)` 调用，删除 `checkPageArgs` 方法；
+- 删除 `MAX_PAGE_SIZE` 常量；
+- 库存不足（`PRODUCT_STOCK_NOT_ENOUGH`）、订单不存在（`ORDER_NOT_FOUND`）等业务异常全部保留。
+
+### 第 4 步｜踩坑：`@Validated` 让字段名变成 `page.page`
+
+第一版给 `OrderController` 加了类级 `@Validated`，走 AOP 方法校验，返回：
+
+```text
+{"code":1000,"msg":"page.page: 不能小于 1"}
+{"code":1000,"msg":"cursor.size: 不能小于 1"}
+```
+
+- 原因：`ConstraintViolation.getPropertyPath()` 会把**方法名**作为第一段，所以变成 `方法名.参数名`。
+- 处理：去掉 `@Validated`，改用 Spring 6.1+ 对 Controller 方法参数的内建校验（和 L10-5 商品库存接口一致），失败抛 `HandlerMethodValidationException`，直接取参数名：
+
+```text
+{"code":1000,"msg":"page: 不能小于 1"}
+{"code":1000,"msg":"size: 不能大于 100"}
+```
+
+- 【结论】Spring 6.1+ 项目不需要为了 `@RequestParam` 约束再挂 `@Validated`；只有非 Controller 的 Bean 方法校验才需要它。
+
+### 第 5 步｜验证
+
+直连 8083，带三个身份头：
+
+- 【数据】`[D11]`：
+
+| 请求 | 返回 |
+|---|---|
+| `GET /order/page?userId=1&page=0&size=10` | `{"code":1000,"msg":"page: 不能小于 1"}` |
+| `GET /order/page?userId=1&page=1&size=101` | `{"code":1000,"msg":"size: 不能大于 100"}` |
+| `GET /order/page?userId=1&page=1&size=3` | `code=0`，3 条（id=100007/100006/100005） |
+| `GET /order/cursor?userId=1&size=0` | `{"code":1000,"msg":"size: 不能小于 1"}` |
+| `POST /order/create` body=`{}` | `{"code":1000,"msg":"num: 不能为空；productId: 不能为空"}` |
+| `POST /order/create` `{"productId":1,"num":0}` | `{"code":1000,"msg":"num: 不能小于 1"}` |
+| `POST /order/create` `{"productId":1,"num":1}` | `{"code":0,"data":100158}`，orderNo=`ORD000000008009` |
+| `GET /product/1` | 库存 `99 → 98` |
+
+- 【数据】`GET /v3/api-docs/order-service` 含 `OrderCreateDTO`，`minimum=1`；paths 共 6 条（`/order`、`/order/{id}`、`/order/create`、`/order/page`、`/order/cursor`、`/order/compensate/replay`）。
+- 【水位】`id_segment.max_id` 与 Redis `mall:order:seq` 同步到 `8009`；测试订单 `100158` 保留，不清理。
+
+### L10-6 回滚方案
+
+- 撤销：`OrderCreateDTO` 去掉 4 个注解；Controller 去掉 `@Valid` 与所有参数约束、删除 `MAX_PAGE_SIZE`；`OrderServiceImpl` 恢复 `MAX_PAGE_SIZE` 常量、`create` 的三条件 if、`checkPageArgs` 方法及两处调用。
+- 影响：无表结构变更；回滚后非法参数仍返回 1000，但 message 不带字段名（回到 L9 行为）。
+
 
 

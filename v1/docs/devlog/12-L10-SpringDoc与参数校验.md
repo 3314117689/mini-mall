@@ -35,7 +35,7 @@ L10 不加业务功能，只做三件事：**在线文档、注解校验、异�
 | L10-0 | 基线：编译、无效参数当前响应 | ✅ |
 | L10-1 | 接入 SpringDoc（依赖/分组/prod 开关），三个 Swagger UI 可打开 | ✅ |
 | L10-2 | Swagger 指向网关 + Bearer 鉴权，调通下单/分页 | ✅ |
-| L10-3 | `GlobalExceptionHandler` 接管 JSR303 / 绑定 / 类型转换异常 | ⬜ |
+| L10-3 | `GlobalExceptionHandler` 接管 JSR303 / 绑定 / 类型转换异常 | ✅ |
 | L10-4 | 登录/注册 DTO 校验，删 `UserServiceImpl`/`AuthServiceImpl` 手写 if | ⬜ |
 | L10-5 | 商品与库存接口校验，`/product/stock/**` 文档隐藏 | ⬜ |
 | L10-6 | 下单/分页/游标参数校验，删 `checkPageArgs` 与 `MAX_PAGE_SIZE` | ⬜ |
@@ -252,3 +252,35 @@ foreach ($p in 8081,8082,8083) { curl.exe -s -o NUL -w "%{http_code}" "http://lo
 
 - 撤销：三个 `OpenApiConfig` 去掉 `.servers(...)` 与 `.components(...)`，Controller 去掉 `@Tag/@Operation/@SecurityRequirement` 及其 import。
 - 影响：只影响文档元数据，接口行为、网关鉴权、直连测试方式都不变。
+
+## 七、L10-3 校验异常收口
+
+**改动**：[GlobalExceptionHandler](file:///d:/bishe/workspace/gongju/eclipseworkspace/mini-mall/v1/mall-common/src/main/java/com/mall/common/exception/GlobalExceptionHandler.java) 新增 8 个分支，统一规则：**参数类全部 `code=1000`，message 带字段名**。
+
+| 异常 | 触发场景 | message 形如 |
+|---|---|---|
+| `MethodArgumentNotValidException` | 请求体 `@Valid` 校验失败 | `productId: 不能为 null；num: 最小不能小于 1` |
+| `BindException` | 查询参数/表单绑定失败 | 同上（`MethodArgumentNotValidException` 的父类，兜住其他入口） |
+| `ConstraintViolationException` | 类上 `@Validated` + 参数约束（AOP 校验） | `page: 最小不能小于 1` |
+| `HandlerMethodValidationException` | Spring 6.1+ 内置方法参数校验 | `size: 最大不能超过 100` |
+| `MissingServletRequestParameterException` | 缺必填查询参数 | `缺少必填参数: userId` |
+| `MethodArgumentTypeMismatchException` | `userId=abc` 转 Long 失败 | `参数 userId 类型不正确，应为 Long` |
+| `HttpMessageNotReadableException` | 请求体不是合法 JSON | `请求体格式错误` |
+| `NoResourceFoundException` | 资源不存在（含 prod 关闭后的文档端点） | HTTP **404** 空体 |
+
+- 【为什么改 `NoResourceFoundException`】L10-1 留下的是"200 空体"（原 `handleFavicon` 吞掉所有 `NoResourceFoundException`）。生产关闭 Swagger 后必须能区分"没有这个接口"，所以改成 `@ResponseStatus(HttpStatus.NOT_FOUND)`。
+- 【数据】`[D8]`（直连 8083，带三个身份头）：
+
+| 请求 | 返回 |
+|---|---|
+| `GET /order/page?page=1&size=10`（缺 userId） | `{"code":1000,"msg":"缺少必填参数: userId"}` |
+| `GET /order/page?userId=abc&page=1&size=10` | `{"code":1000,"msg":"参数 userId 类型不正确，应为 Long"}` |
+| `POST /order/create` body=`{bad` | `{"code":1000,"msg":"请求体格式错误"}` |
+| `GET /nope` | HTTP `404`，空体 |
+
+- 前两个分支需要 DTO/参数上的约束注解才会触发，L10-4~L10-6 加完注解后在 L10-7 一并复验。
+
+### L10-3 回滚方案
+
+- 撤销：`GlobalExceptionHandler` 恢复为 L9 版本（只留 `BizException`、`Exception`、`handleFavicon`）。
+- 影响：无数据变更；回滚后 JSR303 异常会落回 5000，prod 关闭文档后又变回 200 空体。

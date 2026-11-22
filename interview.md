@@ -165,6 +165,37 @@
 
 ---
 
+## L6 JWT 登录鉴权
+
+**1.（★★★）JWT 是什么？由哪三部分组成？为什么能防篡改？**
+参考要点：三段 `base64url(header).base64url(payload).signature`。header 存 `alg`/`kid`，payload 存 `sub`/自定义 claim/`iat`/`exp`，signature 是对前两段的签名。防篡改靠签名：改任意一个字符，验签就对不上。注意 payload 只是 Base64URL 编码，**不是加密**，任何人都能解开看，不能放密码等敏感信息。
+
+**2.（★★★）为什么用 RS256 而不是 HS256？JWKS 是干什么的？**
+参考要点：HS256 是共享密钥——签发方和验签方用同一个 secret，任何验签方都能伪造 token，微服务里一人泄露全盘皆输。RS256 是非对称：**私钥只留在用户服务签名**，其他服务只用公钥验签，公钥泄露也无法伪造。JWKS（RFC 7517）是把公钥按 `kid` 公布成标准 JSON 的端点，密钥轮换时验签方按 `kid` 自动选新钥匙，不用改代码、不用重新部署。
+
+**3.（★★★）请求进来后，验 token 的完整链路是什么？ThreadLocal 为什么要 clear？**
+参考要点：拦截器 `preHandle` 读 `Authorization: Bearer` → 去掉前缀 → 按 header 里的 `kid` 从 JWKS 取公钥（本地缓存，首次懒加载）→ jjwt 验签名和 `exp` → claims 还原成 `LoginUser` → 存入 `UserContext`（ThreadLocal）→ Controller 用 `@CurrentUser` 直接拿 userId → 请求结束 `afterCompletion` 调 `clear()`。Tomcat 线程池复用线程，不清就会把上一个请求的用户身份带给下一个请求，属于严重串号事故。
+
+**4.（★★）密码为什么用 BCrypt，不用 MD5/SHA？盐有什么用？**
+参考要点：MD5/SHA 是快速哈希，GPU 每秒能试上亿次，加彩虹表基本等于明文；BCrypt 故意慢（强度 10 = 2^10 轮）且自带随机盐，同一密码每次哈希都不同，彩虹表失效、批量破解成本极高。哈希不可逆，登录只能 `matches(明文, 哈希)` 重新算一遍比对，不能"解密"。
+
+**5.（★★）用户不存在和密码错误，为什么返回同一个错误码？**
+参考要点：防用户名枚举。如果"用户不存在"单独返回 1001，攻击者可以批量试用户名，先摸清哪些账号存在，再做定向撞库。统一返回"用户名或密码错误"，让两种失败对外不可区分。
+
+**6.（★★★）微服务之间怎么传递用户身份？异步调用会有什么问题？**
+参考要点：用户身份在 `UserContext`（ThreadLocal）里，order 调 user 时由 Feign 的 `RequestInterceptor` 从上下文取原始 token，加到下游请求的 `Authorization` 头，下游自己的拦截器再验一遍。ThreadLocal 只在当前线程有效：Feign 默认同步调用没问题，一旦换成线程池/`@Async`/`CompletableFuture`，子线程读不到，需要显式传递或做上下文装饰。
+
+**7.（★★）JWT 是无状态的，那"退出登录"和"token 被盗"怎么处理？**
+参考要点：服务端不存 session，签发出去的 token 在 `exp` 前始终有效，无法单个作废。常见方案：① 缩短 TTL + refresh token；② Redis 黑名单存 jti，验签时多查一次；③ 改密码/角色时给用户一个 `tokenVersion`，token 里带上旧版本就失效。本项目从简，只靠短 TTL。
+
+**8.（★★）RBAC 怎么实现的？角色改了旧 token 为什么还生效？**
+参考要点：用户表加 `role` 字段，签发时把 role 写进 claims；Controller 方法标 `@RequireRole("ADMIN")`，拦截器用 `HandlerMethod` 反射读注解，比较 `user.getRole()`，不匹配抛 4030。role 是签发那一刻的快照，改库后旧 token 在过期前仍是旧角色——要立即生效只能重新登录或校验版本号。
+
+**9.（★★）401 和 403 有什么区别？你的项目为什么 HTTP 状态码还是 200？**
+参考要点：401 = 没登录/凭证无效（本项目 4010/4011），403 = 登录了但没权限（4030）。项目沿用全工程约定：HTTP 一律 200，成功失败看 body 里的 `code`，前端只需要一套解析逻辑；代价是不符合 REST 语义，网关/监控要按 body 判断。
+
+---
+
 ## 待补楼层
 
-- L6 及以后：逐层追加
+- L7 及以后：逐层追加

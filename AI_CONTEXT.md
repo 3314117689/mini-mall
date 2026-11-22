@@ -208,8 +208,29 @@
 
 ### 3.5 后续楼层（待通关后沉淀）
 
-- L5 Redis 缓存模板：通关后在此追加
-- L6-L10：通关后逐层追加
+- L5 Redis 缓存模板：尚未沉淀
+- L7-L10：通关后逐层追加
+
+### 3.6 JWT 登录鉴权（L6）
+
+**默写顺序（依赖顺序）**：密钥对 → 注册哈希 → 登录签发 → 公钥端点 → 验签器 → 拦截器 + 上下文 → 接口取用户 → 角色注解
+
+1. **密钥对**：RSA 2048；私钥只放签发服务，公钥给所有验签方。PEM 去头尾→Base64 解码→`PKCS8EncodedKeySpec`（私钥）/ `X509EncodedKeySpec`（公钥）→ `KeyFactory.getInstance("RSA")`。
+2. **注册哈希**：`passwordEncoder.encode(明文)` 写库；BCrypt 自带随机盐，同一密码每次哈希不同；`matches(明文, 哈希)` 验证，不可逆。
+3. **登录签发**：查用户 → `matches` → `Jwts.builder().header().keyId(kid).and().subject(userId).claim(...).issuedAt(now).expiration(now+ttl).signWith(privateKey, Jwts.SIG.RS256).compact()`。
+4. **公钥端点**：`GET /auth/jwks` 返回 `{"keys":[{kty,use,alg,kid,n,e}]}`；`n/e` 用 Base64URL 无填充，`BigInteger.toByteArray()` 要去掉符号字节 `0x00`。
+5. **验签器**：`Jwts.parser().keyLocator(h -> resolveKey(h.get("kid"))).build().parseSignedClaims(token).getPayload()`；公钥按 kid 缓存，首次懒加载 JWKS。
+6. **拦截器**：`preHandle` 读 `Authorization: Bearer` → 验签 → 角色校验 → `UserContext.set(user/token)`；`afterCompletion` 必须 `clear()`。
+7. **接口取用户**：`@CurrentUser Long userId` + `HandlerMethodArgumentResolver` 从 ThreadLocal 取，Controller 不解析 token。
+8. **服务间透传**：Feign `RequestInterceptor` 从 `UserContext.getToken()` 取票加到下游请求头；异步线程会丢 ThreadLocal。
+
+**口诀**：
+> 私钥签、公钥验，kid 指路 JWKS；
+> BCrypt 存盐不存明文，登录换票两小时；
+> 拦截器验票存线程，Controller 只取 id；
+> 调下游带同一张票，角色注解管权限。
+
+**自测三问**：RS256 与 HS256 的本质区别？（非对称 vs 共享密钥）/ ThreadLocal 为什么必须 clear？（Tomcat 线程复用串号）/ token 为什么无法即时吊销？（无状态，服务端不存）
 
 > 当前进度、遗留清单、下一步计划 → 一律看 `DEV_LOG.md`，本文档不记进度。
 

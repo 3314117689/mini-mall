@@ -33,7 +33,7 @@ L0~L5 的 `POST /order/create` 里，`userId` 是客户端自己填的：谁都�
 | L6-4 | `mall-common` 鉴权组件 + order 注册拦截器 | ✅ |
 | L6-5 | 下单取当前用户；user 鉴权；Feign 透传 token | ✅ |
 | L6-6 | `@RequireRole` RBAC 演示 | ✅ |
-| L6-7 | 全链路实测 + 文档收尾 | 未开始 |
+| L6-7 | 全链路实测 + 文档收尾 | ✅ |
 
 ## 四、涉及文件与归属（L6-1）
 
@@ -1112,3 +1112,39 @@ DELETE /user/8（zhangsan，ADMIN）→ {"code":0,"msg":"ok"}
 2. 角色来自 token 快照：把 zhangsan 改成 USER 后，旧 token 在过期前仍能通过 ADMIN 校验；要立刻生效只能重新登录或引入"角色版本号 + 校验"。
 3. 注解可以标在类上；本实现只读方法注解（`getMethodAnnotation`），类级需要额外 `getBeanType().getAnnotation(...)`。
 4. 403 和 401 是两回事：4010/4011 = 没登录/票无效；4030 = 登录了但角色不够。
+
+
+---
+
+## 十五、L6 整体验收与遗留
+
+### 验收清单
+
+| 项 | 结果 |
+|---|---|
+| 注册：明文不落库 | 库里 `password` 为 `$2a$10$...`，60 字符 |
+| 登录：错误密码 | `code=1005`，用户不存在同码 |
+| 登录：成功签发 | header `{"kid":"mall-l6-dev","alg":"RS256"}`，payload 含 `sub/role/exp` |
+| JWKS | `GET /auth/jwks` 返回 `n/e`，与 PEM 公钥比对一致 |
+| 无 token 调 order | `code=4010` |
+| 篡改 token | `code=4011` |
+| 带 token 下单 | `code=0`，订单 `user_id` 取自 token |
+| body 伪造 userId | 被忽略，库里仍是 token 里的用户 |
+| user 服务鉴权 | 无 token → 4010；Feign 透传后正常 |
+| RBAC | USER 删除 → 4030 且数据未变；ADMIN → 成功 |
+| 编译 | `mvn -q -DskipTests install` 通过 |
+
+### 四条链路对应的证据
+
+1. **注册**：`POST /auth/register` → `data=7` → 库里 60 字符哈希。
+2. **登录**：`POST /auth/login` → `expiresIn=7200`；离线解 header/payload 得到 `kid/role`。
+3. **下单**：`POST /order/create {"productId":1,"num":2}` + lisi token → `data=6`；库里 `user_id=2`。
+4. **越权**：lisi 删用户 → `4030`；zhangsan 删 → `code=0`。
+
+### 遗留（明确不做 / 后续楼层）
+
+1. `POST /order`（L0 的纯写库接口）仍接收 body 里的 `userId`，属教学遗留，生产应删除或限制为内部接口。
+2. 订单查询未校验"订单是否属于当前用户"（水平越权），RBAC 只解决角色。
+3. token 无法即时吊销；角色变更要重新登录才生效。
+4. 密钥对提交在仓库里，仅供本地学习。
+5. Gateway 统一鉴权、限流留到 L7。

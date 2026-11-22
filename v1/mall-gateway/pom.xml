@@ -13,6 +13,14 @@
     <description>API 网关：统一入口、路由转发、鉴权、限流（L7）</description>
 
     <dependencies>
+        <!-- 公共模块：复用 L6 的 JwtVerifier（验签）、Result、ErrorCode。
+             mall-common 里的 spring-boot-starter-web 是 provided，不会传递给网关，
+             所以不会把 Servlet/WebMVC 带进这个 WebFlux 应用 -->
+        <dependency>
+            <groupId>com.mall</groupId>
+            <artifactId>mall-common</artifactId>
+        </dependency>
+
         <!-- Spring Cloud Gateway（WebFlux 版，5.x 的构件名带 server-webflux）。
              网关是响应式的，和业务服务的 spring-boot-starter-web 互斥：
              这里绝对不能引 starter-web，否则 WebMVC 和 WebFlux 两个容器同时抢着启动 -->

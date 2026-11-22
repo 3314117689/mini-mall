@@ -36,7 +36,7 @@ L7 增加一个网关（`9000`）：
 | 步 | 内容 | 状态 |
 |---|---|---|
 | L7-1 | 新建 `mall-gateway`，三条路由打通 | ✅ |
-| L7-2 | `AuthGlobalFilter`：白名单 + 验签 + 注入身份头 | 未开始 |
+| L7-2 | `AuthGlobalFilter`：白名单 + 验签 + 注入身份头 | ✅ |
 | L7-3 | 服务改信任网关头，Feign 透传 | 未开始 |
 | L7-4 | 网关限流 `RequestRateLimiter` | 未开始 |
 | L7-5 | CORS、错误统一、全链路验收、收尾 | 未开始 |
@@ -265,3 +265,251 @@ GET http://127.0.0.1:9000/nope
 1. 前端请求 `/api/order/1`，网关转发给 order 服务时路径是什么？是哪一步改的？
 2. 为什么 `lb://product-service` 在启动日志里查不到具体 IP，但请求时能连上 8082？
 3. 如果网关 pom 里误加了 `spring-boot-starter-web`，会发生什么？
+
+---
+
+## 十、L7-2 网关统一验 JWT
+
+**命令入场**
+
+```text
+A. GET  http://localhost:9000/api/order/1          （不带 Authorization）
+B. GET  http://localhost:9000/api/order/1          （Authorization: Bearer <zhangsan 的 token>）
+C. GET  http://localhost:9000/api/product/1        （不带 token，公开读）
+D. POST http://localhost:9000/api/product          （不带 token，写操作）
+```
+
+**涉及文件**
+
+| 名字 | 归属 | 作用 |
+|---|---|---|
+| `AuthGlobalFilter` | 本项目，`mall-gateway/src/main/java/com/mall/gateway/filter/AuthGlobalFilter.java` | 白名单、验签、删/写身份头、写错误 JSON |
+| `GatewayAuthConfig` | 本项目，`mall-gateway/src/main/java/com/mall/gateway/config/GatewayAuthConfig.java` | 用 `mall.jwt.jwks-uri` 造一个 `JwtVerifier` Bean |
+| `JwtVerifier` | 本项目，`mall-common/.../auth/JwtVerifier.java` | L6 的验签器，网关直接复用 |
+| `GlobalFilter` / `Ordered` | 框架：Spring Cloud Gateway | 所有路由都会经过的过滤器；`getOrder()` 决定先后 |
+| `Result` | 本项目，`mall-common/.../result/Result.java` | 错误响应仍用统一返回体 |
+
+**调用链**
+
+| 顺序 | 谁 | 在哪 | 干了什么 |
+|---|---|---|---|
+| 1 | Netty | — | 收到请求，构造 `ServerWebExchange` |
+| 2 | `AuthGlobalFilter.filter` | 第 73-80 行 | 取 path，先判断是不是公开路径 |
+| 3 | `AuthGlobalFilter.filter` | 第 82-86 行 | 受保护路径：读 `Authorization`，没有 `Bearer ` 前缀直接 4010 |
+| 4 | `AuthGlobalFilter.filter` | 第 88-96 行 | 截出 token，交 `JwtVerifier.verify` 验签 |
+| 5 | `JwtVerifier.verify` | 第 52-67 行 | 按 `kid` 取公钥（首次拉 JWKS），验签名和 `exp` |
+| 6 | `AuthGlobalFilter.filter` | 第 98-109 行 | 删伪造头 → 写 `X-Mall-User-Id/Username/Role` → 继续过滤链 |
+| 7 | 路由过滤器 | 框架 | `lb://` 换实例 + `StripPrefix=1` 去 `/api` |
+| 8 | 下游 Controller | 本项目 | 正常执行业务 |
+| 9 | 下游响应 | — | 原路回到浏览器 |
+
+**数据编号**
+
+| 编号 | 数据 | 初始值 | 谁产生 |
+|---|---|---|---|
+| `[D1]` | 请求路径 | `/api/order/1` | 浏览器 |
+| `[D2]` | 请求方法 | `GET` | 浏览器 |
+| `[D3]` | Authorization 头 | `"Bearer eyJraWQiOi..."` 或 `null` | 浏览器 |
+| `[D4]` | token | `eyJraWQiOi...` | 第 88 行截取 |
+| `[D5]` | 当前用户 | `LoginUser{userId=1, username=zhangsan, role=ADMIN}` | `JwtVerifier` |
+| `[D6]` | 注入的身份头 | `X-Mall-User-Id: 1` 等三个 | 第 98-109 行 |
+| `[D7]` | 下游响应 | `{"code":0,"data":{"id":1,...},"msg":"ok"}` | order 服务 |
+| `[D8]` | 浏览器最终收到 | 同 `[D7]` | 网关回写 |
+
+**五个结局（总览）**
+
+| 结局 | 分岔点 | 条件 | 浏览器 |
+|---|---|---|---|
+| ① 公开路径放行 | 第 78 行 `isPublic` | 登录/注册/JWKS；或商品 GET/HEAD | 直接转发，`code=0` |
+| ② 受保护 + 有效 token | 第 91 行 `verify` 返回 | 签名对、未过期 | 转发，返回业务结果 |
+| ③ 没带 token | 第 83 行 | 头为 `null` 或不以 `Bearer ` 开头 | `{"code":4010}` |
+| ④ token 无效 | 第 91 行抛 `BizException` | 签名错/过期/格式错 | `{"code":4011}` |
+| ⑤ 拉不到 JWKS | `JwtVerifier.refreshKeys` | 用户服务没起且本地没缓存公钥 | `{"code":4012}` |
+
+### 结局①逐步行进：公开路径放行
+
+#### 第 1 步｜判断白名单
+
+```java
+// 文件：mall-gateway/src/main/java/com/mall/gateway/filter/AuthGlobalFilter.java
+// 行号：116-125
+private boolean isPublic(String path, HttpMethod method) {
+    if (HttpMethod.OPTIONS.equals(method)) {
+        return true;
+    }
+    if (PUBLIC_PATHS.contains(path)) {
+        return true;
+    }
+    return path.startsWith("/api/product")
+            && (HttpMethod.GET.equals(method) || HttpMethod.HEAD.equals(method));
+}
+```
+
+- 【你写的】三段判断：预检、三个完全公开路径、商品读接口。
+- 【数据】`GET /api/product/1` → `[D1]` 命中 `startsWith("/api/product")` 且方法是 GET → `true`。
+
+#### 第 2 步｜删掉客户端伪造的身份头再放行
+
+```java
+// 行号：78-80、128-137
+if (isPublic(path, request.getMethod())) {
+    return chain.filter(withoutIdentityHeaders(exchange));
+}
+```
+
+- 【你写的】即使是公开接口，也先 `remove` 三个 `X-Mall-*` 头。
+- 【数据】客户端如果带了 `X-Mall-User-Id: 999`，到这里被删除，`[D6]` 不会产生。
+- 为什么公开接口也要删：下游以后只认这三个头，公开读接口不校验身份；不删的话，客户端可以自己造一个身份头混进下游。
+
+#### 第 3 步｜继续过滤链
+
+- 【框架动作】`chain.filter(...)` 把请求交给后面的路由过滤器：`lb://` 换实例 → `StripPrefix=1` → 发往下游。
+- 【数据】`[D1] /api/product/1` → 下游 `/product/1`；浏览器收到商品 JSON。
+
+### 结局②逐步行进：受保护 + 有效 token
+
+#### 第 1 步｜不在白名单
+
+- 【数据】`[D1] = /api/order/1`，`[D2] = GET`：既不在 `PUBLIC_PATHS`，也不是商品路径 → `isPublic` 返回 `false`，进入验签分支。
+
+#### 第 2 步｜读 Authorization
+
+```java
+// 行号：82-86
+String authorization = request.getHeaders().getFirst(HttpHeaders.AUTHORIZATION);
+if (authorization == null || !authorization.startsWith(BEARER_PREFIX)) {
+    log.warn("网关鉴权失败, path={}, 原因=没有 Bearer token", path);
+    return writeError(exchange, ErrorCode.UNAUTHORIZED);
+}
+```
+
+- 【你写的】只认 `Authorization: Bearer ` 这一种写法。
+- 【数据】`[D3] = "Bearer eyJraWQiOi..."` → 前缀匹配 → 进入下一步。
+
+#### 第 3 步｜截 token、验签
+
+```java
+// 行号：88-96
+String token = authorization.substring(BEARER_PREFIX.length()).trim();
+LoginUser user;
+try {
+    user = jwtVerifier.verify(token);
+} catch (BizException e) {
+    log.warn("网关鉴权失败, path={}, code={}", path, e.getCode());
+    return writeError(exchange, e.getCode(), e.getMessage());
+}
+```
+
+- 【你写的】截掉 `"Bearer "`，把 token 交给 L6 的验签器。
+- 【框架动作】`JwtVerifier` 内部：按 token 头的 `kid` 找公钥，第一次请求时 GET `http://localhost:8081/auth/jwks` 并缓存；用公钥验签名、检查 `exp`。
+- 【数据】`[D3]` → `[D4]`；验签通过后 claims → `[D5] = LoginUser{userId=1, username=zhangsan, role=ADMIN}`。
+- 日志证据：`JWKS 已加载, kid=mall-l6-dev` 只在第一次请求出现。
+
+#### 第 4 步｜删伪造头、写真实身份
+
+```java
+// 行号：98-109
+ServerHttpRequest mutated = request.mutate()
+        .headers(headers -> {
+            headers.remove(HEADER_USER_ID);
+            headers.remove(HEADER_USERNAME);
+            headers.remove(HEADER_ROLE);
+            headers.set(HEADER_USER_ID, String.valueOf(user.getUserId()));
+            headers.set(HEADER_USERNAME, user.getUsername());
+            headers.set(HEADER_ROLE, user.getRole());
+        })
+        .build();
+return chain.filter(exchange.mutate().request(mutated).build());
+```
+
+- 【你写的】先 `remove` 再 `set`，顺序不能反：先删掉客户端可能伪造的值，再写验签得到的值。
+- 【数据】`[D5]` → `[D6]`：三个头变成 `1`、`zhangsan`、`ADMIN`。
+- 注意：`Authorization` 头没有删，仍会原样转发给下游；L7-2 阶段下游还在自己验 token（双验），L7-3 才切换成只认身份头。
+
+#### 第 5 步｜转发与返回
+
+- 【框架动作】路由过滤器把请求发到 order 实例，order 自己的 `JwtInterceptor` 再验一次同一张 token。
+- 【数据】`[D7] = {"code":0,"data":{"id":1,"amount":1.00,...},"msg":"ok"}` → `[D8]` 浏览器。
+
+### 结局③逐步行进：没带 token
+
+- 【你写的】第 83 行条件成立 → 第 85 行 `writeError(UNAUTHORIZED)`。
+- 【数据】`[D4]`、`[D5]`、`[D6]` 都不产生；响应体：
+
+```json
+{"code":4010,"msg":"未登录，请先登录","data":null}
+```
+
+- 【框架动作】`writeError` 把 `Result` 序列化成字节，包成 `DataBuffer` 写出；HTTP 状态是 **200**，沿用全工程"只看 body.code"的约定。
+
+### 结局④逐步行进：token 无效
+
+- 【框架动作】jjwt 拆 token 失败或验签失败，抛 `JwtException`；`JwtVerifier` 第 63-66 行捕获后转成 `BizException(TOKEN_INVALID)`。
+- 【你写的】第 92-96 行捕获 `BizException`，取它的 `code` 和 `msg` 写响应。
+- 【数据】`[D5]`、`[D6]` 不产生；响应 `{"code":4011,"msg":"登录凭证无效或已过期","data":null}`。
+- 为什么不在网关 `catch` 后统一写 4010：4011 和 4012 是不同原因（凭证错 vs 认证服务不可用），前端/排查需要区分。
+
+### 结局⑤逐步行进：拉不到 JWKS
+
+- 【框架动作】`JwtVerifier` 第一次验签需要拉 JWKS，`httpClient.send` 失败 → `BizException(AUTH_UNAVAILABLE)`（4012）。
+- 【你写的】同样被第 92-96 行捕获，按 4012 返回。
+- 【数据】响应 `{"code":4012,"msg":"认证服务不可用，请稍后重试","data":null}`。
+- 注意：公钥一旦缓存，用户服务短暂宕机不影响已有 `kid` 的验签；只有遇到没缓存的 `kid` 才会触发拉取。
+
+### L7-2 实测
+
+```text
+1. POST /api/auth/login {"username":"zhangsan","password":"123456"}
+   → code=0, token 长度 501
+
+2. GET /api/product/1（无 token）
+   → HTTP 200 {"code":0,"data":{"id":1,"name":"测试商品",...},"msg":"ok"}
+
+3. POST /api/product（无 token）
+   → {"code":4010,"msg":"未登录，请先登录","data":null}
+
+4. GET /api/order/1（无 token）
+   → {"code":4010,"msg":"未登录，请先登录","data":null}
+
+5. GET /api/order/1（Authorization: Bearer abc.def.ghi）
+   → {"code":4011,"msg":"登录凭证无效或已过期","data":null}
+
+6. GET /api/order/1（zhangsan 的有效 token）
+   → HTTP 200 {"code":0,"data":{"id":1,"amount":1.00,...},"msg":"ok"}
+
+7. GET /api/order/1（只带 X-Mall-User-Id: 1，不带 token）
+   → {"code":4010,"msg":"未登录，请先登录","data":null}
+
+网关日志：
+WARN AuthGlobalFilter : 网关鉴权失败, path=/api/product, 原因=没有 Bearer token
+WARN AuthGlobalFilter : 网关鉴权失败, path=/api/order/1, 原因=没有 Bearer token
+WARN AuthGlobalFilter : 网关鉴权失败, path=/api/order/1, code=4011
+INFO JwtVerifier       : JWKS 已加载, kid=mall-l6-dev
+```
+
+### L7-2 坑
+
+1. **Boot 4 默认 Jackson 3，jjwt 带的是 Jackson 2**：按 `com.fasterxml.jackson.databind.ObjectMapper` 从容器注入会启动失败，报 `Consider defining a bean of type 'com.fasterxml.jackson.databind.ObjectMapper'`。本项目改为过滤器内自建 Jackson 2 实例，只用来写固定结构的错误 JSON。
+2. **白名单必须写 `/api/...`**：`AuthGlobalFilter` 的 `getOrder()` 是 `-100`，排在 `StripPrefix` 之前，此时路径还没被剥掉。写成 `/order/**` 永远匹配不上。
+3. **WebFlux 不能复用 MVC 的错误处理**：网关没有 `@RestControllerAdvice` 的适用场景，异常不会自动变成 `Result`；必须在过滤器里自己写响应。
+4. **错误响应仍是 HTTP 200**：与 L6 保持一致，前端只判断 body 的 `code`；代价是监控/网关层不能靠 HTTP 状态判断成败。
+5. **商品只放行读**：`POST/PUT/DELETE /api/product/**` 仍要 token；公开的只有 `GET/HEAD`。
+6. **OPTIONS 必须放行**：浏览器的 CORS 预检不带 token，不放行会在 L7-5 配 CORS 后卡住。
+7. **`X-Mall-*` 头必须先删后写**：只 `set` 不 `remove` 的话，同名多值会让下游取到第一个（可能是伪造值）。
+8. **L7-2 是双验阶段**：网关验一次、服务再验一次；这不是最终形态，L7-3 把服务改成只认身份头后才真正"鉴权收口"。
+
+### L7-2 断点验证与自测题
+
+| 停在哪 | 看什么 | 看到什么证明走对了 |
+|---|---|---|
+| `AuthGlobalFilter.filter` 第 75 行 | `path`、`request.getMethod()` | `GET` / `/api/order/1` |
+| 第 79 行 | `isPublic(...)` 的返回值 | 商品 GET 为 `true`，order 为 `false` |
+| 第 91 行执行后 | `user` | `LoginUser{userId=1, username=zhangsan, role=ADMIN}` |
+| 第 109 行前 | `mutated.getHeaders()` | 三个 `X-Mall-*` 头都是 token 里的值 |
+| 第 149 行 | `bytes` 转成字符串 | 与浏览器收到的 `{"code":4010,...}` 一致 |
+
+### 自测题（不附答案）
+
+1. 为什么网关的白名单路径要写成 `/api/order/**` 而不是 `/order/**`？
+2. 客户端带 `X-Mall-User-Id: 999` 但没有 token，能否混进受保护接口？为什么？
+3. 网关已经验过 token 了，L7-2 为什么下游还要再验一次？L7-3 会怎么改？

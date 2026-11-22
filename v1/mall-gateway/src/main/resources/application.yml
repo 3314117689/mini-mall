@@ -36,3 +36,8 @@ spring:
                 - Path=/api/order/**
               filters:
                 - StripPrefix=1
+
+# 网关验签（L7-2）：只填公钥端点，网关不存私钥、只验签
+mall:
+  jwt:
+    jwks-uri: http://localhost:8081/auth/jwks

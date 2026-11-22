@@ -1,5 +1,8 @@
 package com.mall.order.service;
 
+import java.time.LocalDateTime;
+import java.util.List;
+
 import com.mall.order.dto.OrderCreateDTO;
 import com.mall.order.entity.Order;
 
@@ -20,4 +23,10 @@ public interface OrderService {
 
 	/** 删除订单，订单不存在时抛业务异常 */
 	void deleteById(Long id);
+
+	/** L8：offset 分页，page 从 1 开始，深翻页用它暴露问题 */
+	List<Order> page(Long userId, int page, int size);
+
+	/** L8：游标分页，lastCreateTime/lastId 传空表示第一页 */
+	List<Order> cursor(Long userId, LocalDateTime lastCreateTime, Long lastId, int size);
 }

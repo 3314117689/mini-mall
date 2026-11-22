@@ -27,6 +27,7 @@
 | [07-L6-JWT登录鉴权.md](07-L6-JWT登录鉴权.md) | RSA 密钥与 JWKS、BCrypt、签发/验签、拦截器、ThreadLocal、RBAC |
 | [08-理解确认台账.md](08-理解确认台账.md) | 用户已确认理解的内容、卡点、确认时间 |
 | [09-L7-Gateway网关.md](09-L7-Gateway网关.md) | 路由三要素、lb:// 换实例、StripPrefix、网关验签与限流 |
+| [10-L8-MySQL优化.md](10-L8-MySQL优化.md) | 造数基线、联合索引、EXPLAIN 对比、深翻页、按月分区 |
 
 ## 写作规范（写本目录任何一章都必须遵守）
 

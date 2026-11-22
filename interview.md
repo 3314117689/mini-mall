@@ -224,6 +224,34 @@
 
 ---
 
+## L8 MySQL 优化
+
+**1.（★★★）一条"按用户查订单、按时间倒序、分页"的 SQL 为什么会慢？怎么优化？**
+参考要点：没有合适索引时 `type=ALL` 全表扫，`ORDER BY create_time` 触发 `Using filesort`，`LIMIT offset,size` 还要丢弃前 offset 条。优化：建联合索引 `(user_id, create_time)`，等值列在前、排序列在后，让索引同时完成过滤和排序；EXPLAIN 里 `type` 变 `ref`、`key` 命中索引、`Extra` 的 `Using filesort` 消失。再深的分页用延迟关联或游标分页。
+
+**2.（★★★）联合索引的列顺序怎么定？`(user_id, create_time)` 和 `(create_time, user_id)` 有什么区别？**
+参考要点：最左前缀原则——索引按第一列、第二列依次有序。查询是 `where user_id=? order by create_time`，所以 `user_id` 在前才能先定位到该用户的连续区间，且区间内 `create_time` 天然有序，排序免掉。反过来的索引第一列是时间，无法用 `user_id` 定位，只能扫全索引或全表，排序也用不上。经验：等值条件列在前，范围/排序列在后。
+
+**3.（★★★）什么是 filesort？为什么加了索引就没有了？**
+参考要点：`filesort` 不是"用磁盘文件排序"，而是 MySQL 无法利用索引顺序，必须把结果取出来再排一次。联合索引 `(user_id, create_time)` 中，同一 `user_id` 下的记录按 `create_time` 有序，范围扫描直接按索引顺序读出来就是结果顺序，不需要额外排序。注意 `ORDER BY` 的方向要与索引一致（本项目倒序，MySQL 5.7 会反向扫描索引）。
+
+**4.（★★★）深翻页 `LIMIT 79990,10` 为什么慢？延迟关联和游标分页分别怎么解决？**
+参考要点：offset 越大，数据库要先取出并丢弃前 79990 条（有索引时是扫索引项 + 回表）。延迟关联：子查询只查主键 `select id ... limit 79990,10`，再拿这 10 个 id 回表，回表次数从 8 万降到 10；游标分页：记住上一页最后的 `(create_time,id)`，用 `where (create_time,id) < (?,?) limit 10` 直接定位，代价恒定。游标分页缺点：只能下一页、不能跳页，且必须有唯一稳定的排序键。
+
+**5.（★★★）MySQL 分区表怎么按月分？有什么限制和代价？**
+参考要点：`PARTITION BY RANGE COLUMNS(create_time)`，每月一个分区，末尾留 `pmax` 兜底；查询条件带 `create_time` 范围时触发分区裁剪（`EXPLAIN PARTITIONS` 只显示命中分区）。限制：**每个唯一键（含主键）都必须包含分区列**，所以主键要改成 `(id, create_time)`；分区列不能是 `NULL` 语义不清的表达式。代价：按 `id` 单查不带分区列时会打开所有分区；分区数不宜过多；`ALTER TABLE ... ADD PARTITION` 要提前做，不能等数据写不进去。
+
+**6.（★★）MySQL 5.7 没有 `EXPLAIN ANALYZE`，怎么证明优化真的生效？**
+参考要点：`EXPLAIN` 的 `rows/filtered` 是估算值，不能当实际值。5.7 用 `SHOW SESSION STATUS LIKE 'Handler_read%'`：`Handler_read_rnd_next` 高说明全表扫，`Handler_read_next` 才是有序索引扫描；配合 `SET profiling=1; SHOW PROFILES;` 看每条 SQL 的真实耗时。8.0 才有 `EXPLAIN ANALYZE`。
+
+**7.（★★）为什么 `ORDER BY` 要补一个 `id`？**
+参考要点：`create_time` 是秒级 `datetime`，同一秒可能有多条，排序键不唯一时分页会出现重复或漏行（数据库对相等值的顺序不保证）。补 `id desc` 让排序键唯一；联合索引 `(user_id, create_time)` 的二级索引尾部隐含主键，所以 `create_time desc, id desc` 仍能利用索引顺序。
+
+**8.（★）10 万条测试数据怎么快速造？**
+参考要点：建 0~9 的数字表，五表交叉连接得到 0~99999 的序列，再用 `INSERT ... SELECT` 配合 `DATE_ADD` 生成跨月时间，一条 SQL 完成，不需要存储过程。注意让重点用户的数据量足够大，否则深翻页测不出效果。
+
+---
+
 ## 待补楼层
 
-- L8 及以后：逐层追加
+- L9 及以后：逐层追加

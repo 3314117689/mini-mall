@@ -1,6 +1,8 @@
 package com.mall.order.service.impl;
 
 import java.math.BigDecimal;
+import java.time.LocalDateTime;
+import java.util.List;
 
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Service;
@@ -20,6 +22,9 @@ import lombok.extern.slf4j.Slf4j;
 @Slf4j
 @Service
 public class OrderServiceImpl implements OrderService {
+
+	/** L8：单页上限，防止一次拉太多把接口和内存打满 */
+	private static final int MAX_PAGE_SIZE = 100;
 
 	@Autowired
 	private OrderMapper orderMapper;
@@ -93,6 +98,34 @@ public class OrderServiceImpl implements OrderService {
 		if (orderMapper.deleteById(id) == 0) {
 			log.warn("删除失败, 订单不存在, id={}", id);
 			throw new BizException(ErrorCode.ORDER_NOT_FOUND);
+		}
+	}
+
+	@Override
+	public List<Order> page(Long userId, int page, int size) {
+		checkPageArgs(userId, page, size);
+		// offset 分页的代价就在这里：page 越深，数据库要跳过的行越多
+		int offset = (page - 1) * size;
+		log.info("分页查询订单, userId={}, page={}, size={}, offset={}", userId, page, size, offset);
+		return orderMapper.selectPage(userId, offset, size);
+	}
+
+	@Override
+	public List<Order> cursor(Long userId, LocalDateTime lastCreateTime, Long lastId, int size) {
+		if (lastCreateTime == null || lastId == null) {
+			// 第一页没有游标，等价于 offset=0
+			return page(userId, 1, size);
+		}
+		checkPageArgs(userId, 1, size);
+		log.info("游标查询订单, userId={}, lastCreateTime={}, lastId={}, size={}",
+				userId, lastCreateTime, lastId, size);
+		return orderMapper.selectCursor(userId, lastCreateTime, lastId, size);
+	}
+
+	/** 分页参数统一校验，page 从 1 开始 */
+	private void checkPageArgs(Long userId, int page, int size) {
+		if (userId == null || page < 1 || size < 1 || size > MAX_PAGE_SIZE) {
+			throw new BizException(ErrorCode.PARAM_ERROR);
 		}
 	}
 }

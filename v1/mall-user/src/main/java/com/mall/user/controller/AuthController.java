@@ -10,10 +10,15 @@ import java.util.Map;
 
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.web.bind.annotation.GetMapping;
+import org.springframework.web.bind.annotation.PostMapping;
+import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RestController;
 
+import com.mall.common.result.Result;
 import com.mall.user.auth.JwtKeyLoader;
+import com.mall.user.entity.User;
+import com.mall.user.service.UserService;
 
 /**
  * 认证接口（L6）。/auth/** 是"拿门票"的地方，本身不需要 token。
@@ -25,6 +30,18 @@ public class AuthController {
 
     @Autowired
     private JwtKeyLoader jwtKeyLoader;
+
+    @Autowired
+    private UserService userService;
+
+    /**
+     * 注册（L6-2）：放在 /auth 下，因为 /user/** 以后要登录才能访问。
+     * 入参直接复用 User，password 字段带 WRITE_ONLY，只进不出。
+     */
+    @PostMapping("/register")
+    public Result<Long> register(@RequestBody User user) {
+        return Result.ok(userService.save(user));
+    }
 
     /**
      * JWKS 公钥端点：公布验签公钥（只含公钥部分，泄露也无害）。

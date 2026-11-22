@@ -28,7 +28,7 @@ L0~L5 的 `POST /order/create` 里，`userId` 是客户端自己填的：谁都�
 | 步 | 内容 | 状态 |
 |---|---|---|
 | L6-1 | 生成 RSA 密钥对；`mall-user` 出 JWKS 端点 | ✅ |
-| L6-2 | 注册走 BCrypt；用户名唯一；存量密码迁移 | 未开始 |
+| L6-2 | 注册走 BCrypt；用户名唯一；存量密码迁移 | ✅ |
 | L6-3 | `role` 列；登录签发 RS256 token | 未开始 |
 | L6-4 | `mall-common` 鉴权组件 + order 注册拦截器 | 未开始 |
 | L6-5 | 下单取当前用户；user 鉴权；Feign 透传 token | 未开始 |
@@ -220,7 +220,7 @@ return Map.of("keys", List.of(jwk));
 - 【框架动作】Spring MVC 把 `Map` 转成 JSON 写入响应体。
 - 【数据】`[D11]` → 浏览器收到 `{"keys":[{"kty":"RSA",...,"e":"AQAB"}]}`。
 
-## 七、实测（L6-1）
+## 七、L6-1 实测
 
 ```text
 GET http://localhost:8081/auth/jwks
@@ -232,7 +232,7 @@ HTTP 200
 
 另外用一次性脚本（`v1/target/JwkCheck.java`，生成后已删）校验过：把 `n`/`e` 还原成公钥，与 `jwt-public.pem` 解析出的 `RSAPublicKey` 比对 —— `modulus equal: true`、`exponent equal: true`，证明公布出去的确实是同一把钥匙。
 
-## 八、坑
+## 八、L6-1 坑
 
 1. PEM 头尾标记和换行必须去掉再 Base64 解码，直接整体解码会报 `Illegal base64 character`。
 2. 私钥是 PKCS#8（`BEGIN PRIVATE KEY`）、公钥是 X.509（`BEGIN PUBLIC KEY`），`KeySpec` 用错会抛 `InvalidKeySpecException`。
@@ -240,7 +240,7 @@ HTTP 200
 4. `BigInteger.toByteArray()` 可能带符号字节 `0x00`，不去掉的话模数会变成 257 字节，验签方拼出的公钥不对。
 5. **安全提醒**：`jwt-private.pem` 提交进仓库等于公开私钥，仅限本地学习；生产必须放密钥管理服务，仓库里只留公钥。
 
-## 九、断点验证
+## 九、L6-1 断点验证与自测题
 
 | 停在哪 | 看什么 | 看到什么证明走对了 |
 |---|---|---|
@@ -248,8 +248,198 @@ HTTP 200
 | `AuthController.jwks` 第 35 行 | `key.getModulus().bitLength()` | `2048` |
 | 第 44 行前 | `jwk` | 六个键齐全，`e = "AQAB"` |
 
-## 十、自测题（不附答案）
+### 自测题（不附答案）
 
 1. 为什么私钥只放 `mall-user`，而公钥要公布成 `/auth/jwks`？
 2. `kid` 在什么场景下才会真正用到第二把钥匙？
 3. `n` 为什么必须先去掉 `0x00` 再 Base64URL？
+
+---
+
+## 十、L6-2 注册与 BCrypt 密码哈希
+
+**命令入场**：`POST http://localhost:8081/auth/register`
+body：`{"username":"l6test","password":"123456","phone":"13900000001"}`
+
+**调用链**
+
+| 顺序 | 谁 | 在哪 | 干了什么 |
+|---|---|---|---|
+| 1 | Tomcat 线程 | — | 按路径找到 `AuthController.register` |
+| 2 | 框架 | — | JSON body → `User` 对象（`password` 是 WRITE_ONLY，只进不出） |
+| 3 | `AuthController.register` | 第 41-43 行 | 调 `userService.save(user)` |
+| 4 | `UserServiceImpl.save` | 第 42 行 | 打"新增用户"日志 |
+| 5 | `UserServiceImpl.save` | 第 44-47 行 | 校验用户名/密码非空 |
+| 6 | `UserServiceImpl.save` | 第 49-52 行 | 按用户名查重 |
+| 7 | `UserServiceImpl.save` | 第 54 行 | 明文 → BCrypt 哈希，覆盖 `user.password` |
+| 8 | `UserMapper.insert` | 第 30 行 | 执行 INSERT，自增主键回填 |
+| 9 | `AuthController.register` | 第 43 行 | `Result.ok(id)` |
+
+**数据编号**
+
+| 编号 | 数据 | 初始值 | 谁产生 |
+|---|---|---|---|
+| `[D1]` | 注册请求体 | `User{username=l6test, password=123456, phone=139...}` | 框架从 JSON 转换 |
+| `[D2]` | 查重结果 | `null`（没人用过这个用户名） | `selectByUsername` |
+| `[D3]` | BCrypt 哈希 | `$2a$10$3GX2...`（60 字符） | `passwordEncoder.encode` |
+| `[D4]` | 落库的行 | `user{username=l6test, password=[D3]}` | MyBatis INSERT |
+| `[D5]` | 用户 id | `7` | MySQL 自增回填 |
+| `[D6]` | 响应 | `{"code":0,"data":7,"msg":"ok"}` | `Result.ok` + 框架序列化 |
+
+**三个结局（总览）**
+
+| 结局 | 分岔点 | 条件 | 浏览器 |
+|---|---|---|---|
+| ① 注册成功 | 第 49 行查重结果 | `[D2] = null` | `code=0, data=7` |
+| ② 用户名已存在 | 第 49 行 | `[D2]` 是 `User`（非 null） | `code=1004` |
+| ③ 参数缺失 | 第 44 行 | username 或 password 为 null/空白 | `code=1000` |
+
+### 结局①逐步行进：注册成功
+
+#### 第 1 步｜请求到达，JSON 变对象
+
+- 【框架动作】Tomcat 派线程；Spring MVC 按 `@PostMapping("/register")`（第 41 行）匹配；`@RequestBody`（第 42 行）把 JSON 转成 `User`。
+- 【数据】`[D1]` 产生：`username="l6test"`、`password="123456"`、`phone="13900000001"`、`id=null`。
+
+#### 第 2 步｜进入 Service
+
+```java
+// 文件：mall-user/src/main/java/com/mall/user/controller/AuthController.java
+// 行号：41-44
+@PostMapping("/register")
+public Result<Long> register(@RequestBody User user) {
+    return Result.ok(userService.save(user));
+}
+```
+
+- 【你写的】Controller 只做转发，不处理密码。
+- 【数据】`[D1]` → 作为 `save` 的参数 `user`。
+
+#### 第 3 步｜必填校验
+
+```java
+// 文件：mall-user/src/main/java/com/mall/user/service/impl/UserServiceImpl.java
+// 行号：44-47
+if (user.getUsername() == null || user.getUsername().isBlank()
+        || user.getPassword() == null || user.getPassword().isBlank()) {
+    throw new BizException(ErrorCode.PARAM_ERROR);
+}
+```
+
+- 【你写的】四个条件任一成立就抛 1000。
+- 【数据】`[D1]` 两个字段都非空 → 条件 false → 继续。
+
+#### 第 4 步｜用户名查重
+
+```java
+// 行号：49-52
+if (userMapper.selectByUsername(user.getUsername()) != null) {
+    log.warn("注册失败, 用户名已存在: {}", user.getUsername());
+    throw new BizException(ErrorCode.USERNAME_EXISTS);
+}
+```
+
+- 【你写的】按用户名查一次库，查到就抛 1004。
+- 【框架动作】MyBatis 执行 `select ... where username = ?`，查不到返回 `null`。
+- 【数据】`[D2] = null` → 条件 false → 继续。
+
+#### 第 5 步｜明文变哈希
+
+```java
+// 行号：53-54
+// 明文 → BCrypt 哈希（同一个密码每次生成的哈希都不同，因为带随机盐）
+user.setPassword(passwordEncoder.encode(user.getPassword()));
+```
+
+- 【你写的】调 `PasswordEncoder.encode`，把返回值写回 `user.password`。
+- 【框架动作】`BCryptPasswordEncoder`（框架：Spring Security Crypto）内部：生成随机盐 → 2^10 轮哈希 → 输出 `$2a$10$<salt+hash>`。
+- 【数据】`[D1].password = "123456"` → `[D3] = "$2a$10$3GX2YIDtJ..."`（60 字符）；`[D1]` 被就地改写，原明文不再存在。
+
+> 同一个密码注册两次，两个哈希也不一样（盐不同），但都能用 `matches` 验证回原文。
+
+#### 第 6 步｜写库
+
+```java
+// 行号：55
+userMapper.insert(user);
+```
+
+- 【框架动作】MyBatis 执行 `insert into user(username, password, phone) values(?,?,?)`，`?` 依次填 `l6test`、`[D3]`、`13900000001`；`create_time` 走数据库默认值。
+- 【数据】`[D4]` 落库；`[D5] = 7` 回填到 `user.id`。
+
+#### 第 7 步｜返回
+
+- 【你写的】第 57 行 `return user.getId()` → Controller 第 43 行 `Result.ok(7)`。
+- 【数据】`[D5] = 7` → `[D6] = {"code":0,"data":7,"msg":"ok"}`。
+
+### 结局②逐步行进：用户名已存在
+
+第 1~3 步同结局①（`[D1]` 通过必填校验）。
+
+#### 第 4 步｜查重命中
+
+- 【框架动作】`selectByUsername("l6test")` 查到一行 → 返回 `User{id=7,...}`。
+- 【数据】`[D2] = User{id=7, username=l6test}`，不是 null。
+
+#### 第 5 步｜抛业务异常
+
+- 【你写的】第 51 行 `throw new BizException(ErrorCode.USERNAME_EXISTS)`；第 54 行加密、第 55 行插入**都不执行**。
+- 【数据】`BizException{code=1004, message="用户名已存在"}`。
+
+#### 第 6 步｜全局异常处理器接住
+
+- 【框架动作】`GlobalExceptionHandler.handleBizException` 接住 → `Result.fail(1004, "用户名已存在")`。
+- 【数据】`[D6] = {"code":1004,"data":null,"msg":"用户名已存在"}`，库里没有新增行。
+
+### 结局③逐步行进：参数缺失
+
+- 【你写的】第 46 行直接抛 `BizException(PARAM_ERROR)`；查重、加密、插入都不执行。
+- 【数据】`[D2]`、`[D3]`、`[D4]`、`[D5]` 都不产生；`[D6] = {"code":1000,"msg":"参数错误"}`。
+
+### 存量密码迁移（L6-2 附带）
+
+库里原有 3 条用户是明文 `123456`，登录将无法通过 BCrypt 校验。用一次性工具生成哈希后执行：
+
+```sql
+UPDATE db_user.user
+SET password = '$2a$10$bwSq6Kjb3O7qDe8m.cF.Hu.J2LKhnBKYLM8H5T/qnP.ZTYP7nKbf6'
+WHERE username IN ('zhangsan','lisi','zhangsan2');
+-- Rows affected: 3
+```
+
+- 这条哈希就是 `123456`，3 个演示账号统一成它；新注册用户的哈希由 `encode` 现场生成。
+- 上线系统不能这样批量刷密码，正常做法是"用户下次登录时用明文校验旧密码 → 成功后顺手升级成哈希"。
+
+### L6-2 实测
+
+```text
+POST /auth/register {"username":"l6test","password":"123456","phone":"13900000001"}
+→ {"code":0,"data":7,"msg":"ok"}
+
+再发一次同 body
+→ {"code":1004,"data":null,"msg":"用户名已存在"}
+
+{"username":"","password":"123456"}
+→ {"code":1000,"data":null,"msg":"参数错误"}
+
+查询库：SELECT password, CHAR_LENGTH(password) ... → $2a$10$3GX2YIDtJ... , 60
+```
+
+### L6-2 坑
+
+1. 不引 `spring-security-crypto` 就编译不过 `PasswordEncoder`；引 `spring-boot-starter-security` 则会被自动装上一整套过滤器链，所有接口默认要登录，和自研拦截器打架。
+2. 查重必须在 `encode` 之前：哈希每次都不同，不能拿哈希去比对"用户名是否重复"。
+3. 库里 `password` 是 `varchar(100)`，BCrypt 固定 60 字符，够用；若列宽小于 60 会被截断，登录永远失败。
+4. 存量明文密码不迁移，`encode` 之后的 `matches` 一定失败——不是代码错，是数据旧。
+
+### L6-2 断点验证与自测题
+
+| 停在哪 | 看什么 | 看到什么证明走对了 |
+|---|---|---|
+| `UserServiceImpl.save` 第 49 行 | `userMapper.selectByUsername(...)` 的返回值 | 第一次注册是 `null` |
+| 第 54 行前后 | `user.getPassword()` | 执行前 `123456`，执行后 `$2a$10$...` |
+| `UserMapper.insert` 返回后 | `user.getId()` | 非 null（自增回填成功） |
+
+1. 为什么查重要放在加密之前？
+2. 同一个密码两次注册，哈希为什么不同？登录时怎么还能比对成功？
+3. 为什么只引 `spring-security-crypto`，不引 `spring-boot-starter-security`？

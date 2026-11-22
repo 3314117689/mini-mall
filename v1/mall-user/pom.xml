@@ -61,6 +61,13 @@
             <scope>runtime</scope>
         </dependency>
 
+        <!-- BCrypt 密码哈希（L6-2）：只引 crypto 模块，不引 spring-security 全家桶，
+             避免自动装配一整套 Security 过滤器链，鉴权仍由我们自己的拦截器完成 -->
+        <dependency>
+            <groupId>org.springframework.security</groupId>
+            <artifactId>spring-security-crypto</artifactId>
+        </dependency>
+
         <!-- MyBatis：数据库访问（版本由父工程仲裁，此处不写） -->
         <dependency>
             <groupId>org.mybatis.spring.boot</groupId>

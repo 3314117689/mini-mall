@@ -3,6 +3,7 @@ package com.mall.user.service.impl;
 import lombok.extern.slf4j.Slf4j;
 
 import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.security.crypto.password.PasswordEncoder;
 import org.springframework.stereotype.Service;
 
 import com.mall.common.exception.BizException;
@@ -21,6 +22,10 @@ public class UserServiceImpl implements UserService {
 	@Autowired
 	private UserMapper userMapper;
 
+	/** 密码编码器（L6-2）：注册时把明文换成 BCrypt 哈希，库里永远不存明文 */
+	@Autowired
+	private PasswordEncoder passwordEncoder;
+
 	@Override
 	public User getById(Long id) {
 		log.info("查询用户, id={}", id);
@@ -35,6 +40,18 @@ public class UserServiceImpl implements UserService {
 	@Override
 	public Long save(User user) {
 		log.info("新增用户, username={}", user.getUsername());
+		// 注册入口：用户名和密码是必填，缺了直接 1000，不落库
+		if (user.getUsername() == null || user.getUsername().isBlank()
+				|| user.getPassword() == null || user.getPassword().isBlank()) {
+			throw new BizException(ErrorCode.PARAM_ERROR);
+		}
+		// 用户名唯一：查重放在加密之前，避免白算一次哈希
+		if (userMapper.selectByUsername(user.getUsername()) != null) {
+			log.warn("注册失败, 用户名已存在: {}", user.getUsername());
+			throw new BizException(ErrorCode.USERNAME_EXISTS);
+		}
+		// 明文 → BCrypt 哈希（同一个密码每次生成的哈希都不同，因为带随机盐）
+		user.setPassword(passwordEncoder.encode(user.getPassword()));
 		userMapper.insert(user);
 		// insert 执行完后自增主键已回填到 user.id，直接返回
 		return user.getId();
@@ -43,6 +60,10 @@ public class UserServiceImpl implements UserService {
 	@Override
 	public void update(User user) {
 		log.info("更新用户, id={}", user.getId());
+		// 更新里带了新密码也要先哈希，否则会把明文写进库（L6-2）
+		if (user.getPassword() != null && !user.getPassword().isBlank()) {
+			user.setPassword(passwordEncoder.encode(user.getPassword()));
+		}
 		// 返回受影响行数，0 行说明这个 id 不存在
 		if (userMapper.update(user) == 0) {
 			log.warn("更新失败, 用户不存在, id={}", user.getId());

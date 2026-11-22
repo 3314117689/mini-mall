@@ -23,6 +23,9 @@ public enum ErrorCode {
     /** 订单不存在 */
     ORDER_NOT_FOUND(1003, "订单不存在"),
 
+    /** 注册时用户名已被占用（L6-2） */
+    USERNAME_EXISTS(1004, "用户名已存在"),
+
     /** 用户服务不可用（Sentinel 降级：调用不通时由 fallback 抛出，L4） */
     USER_SERVICE_UNAVAILABLE(2002, "用户服务不可用，请稍后重试"),
 

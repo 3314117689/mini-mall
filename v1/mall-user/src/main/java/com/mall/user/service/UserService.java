@@ -1,5 +1,6 @@
 package com.mall.user.service;
 
+import com.mall.user.dto.RegisterDTO;
 import com.mall.user.entity.User;
 
 /**
@@ -14,8 +15,8 @@ public interface UserService {
      */
     User getById(Long id);
 
-    /** 新增用户，返回数据库生成的 id */
-    Long save(User user);
+    /** 注册新用户（L10-4 起收 DTO），返回数据库生成的 id */
+    Long save(RegisterDTO dto);
 
     /** 更新用户，用户不存在时抛业务异常 */
     void update(User user);

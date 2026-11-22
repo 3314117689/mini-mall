@@ -19,12 +19,13 @@ import com.mall.common.result.Result;
 import com.mall.user.auth.JwtKeyLoader;
 import com.mall.user.dto.LoginDTO;
 import com.mall.user.dto.LoginVO;
-import com.mall.user.entity.User;
+import com.mall.user.dto.RegisterDTO;
 import com.mall.user.service.AuthService;
 import com.mall.user.service.UserService;
 
 import io.swagger.v3.oas.annotations.Operation;
 import io.swagger.v3.oas.annotations.tags.Tag;
+import jakarta.validation.Valid;
 
 /**
  * 认证接口（L6）。/auth/** 是"拿门票"的地方，本身不需要 token。
@@ -47,18 +48,18 @@ public class AuthController {
     /** 登录（L6-3）：用户名 + 密码换 token；失败统一 1005 */
     @Operation(summary = "登录", description = "返回 JWT，Swagger 点 Authorize 填入后即可调用受保护接口")
     @PostMapping("/login")
-    public Result<LoginVO> login(@RequestBody LoginDTO dto) {
+    public Result<LoginVO> login(@Valid @RequestBody LoginDTO dto) {
         return Result.ok(authService.login(dto));
     }
 
     /**
      * 注册（L6-2）：放在 /auth 下，因为 /user/** 以后要登录才能访问。
-     * 入参直接复用 User，password 字段带 WRITE_ONLY，只进不出。
+     * L10-4 起收 RegisterDTO：注解校验只放行 username/password/phone 三个字段。
      */
     @Operation(summary = "注册")
     @PostMapping("/register")
-    public Result<Long> register(@RequestBody User user) {
-        return Result.ok(userService.save(user));
+    public Result<Long> register(@Valid @RequestBody RegisterDTO dto) {
+        return Result.ok(userService.save(dto));
     }
 
     /**

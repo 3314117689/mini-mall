@@ -34,11 +34,7 @@ public class AuthServiceImpl implements AuthService {
 
     @Override
     public LoginVO login(LoginDTO dto) {
-        if (dto.getUsername() == null || dto.getUsername().isBlank()
-                || dto.getPassword() == null || dto.getPassword().isBlank()) {
-            throw new BizException(ErrorCode.PARAM_ERROR);
-        }
-
+        // L10-4：用户名/密码非空交给 LoginDTO 的注解，这里直接查库
         User user = userMapper.selectByUsername(dto.getUsername());
         // 用户不存在 和 密码错误 返回同一个 1005：不让攻击者试出"哪些用户名存在"
         if (user == null || !passwordEncoder.matches(dto.getPassword(), user.getPassword())) {

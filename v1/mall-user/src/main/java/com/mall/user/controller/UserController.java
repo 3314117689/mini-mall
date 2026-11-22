@@ -13,12 +13,14 @@ import org.springframework.web.bind.annotation.RestController;
 import com.mall.common.auth.RequireRole;
 import com.mall.common.result.Result;
 import com.mall.user.config.OpenApiConfig;
+import com.mall.user.dto.RegisterDTO;
 import com.mall.user.entity.User;
 import com.mall.user.service.UserService;
 
 import io.swagger.v3.oas.annotations.Operation;
 import io.swagger.v3.oas.annotations.security.SecurityRequirement;
 import io.swagger.v3.oas.annotations.tags.Tag;
+import jakarta.validation.Valid;
 
 /**
  * 用户接口：按《用户服务接口文档 v1.0》实现。
@@ -42,8 +44,8 @@ public class UserController {
     /** 新增：参数从请求体 JSON 来，用 @RequestBody 接收（和查询的 @PathVariable 不同） */
     @Operation(summary = "新增用户")
     @PostMapping
-    public Result<Long> save(@RequestBody User user) {
-        return Result.ok(userService.save(user));
+    public Result<Long> save(@Valid @RequestBody RegisterDTO dto) {
+        return Result.ok(userService.save(dto));
     }
 
     @Operation(summary = "更新用户")

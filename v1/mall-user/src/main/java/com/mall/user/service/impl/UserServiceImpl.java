@@ -8,6 +8,7 @@ import org.springframework.stereotype.Service;
 
 import com.mall.common.exception.BizException;
 import com.mall.common.exception.ErrorCode;
+import com.mall.user.dto.RegisterDTO;
 import com.mall.user.entity.User;
 import com.mall.user.mapper.UserMapper;
 import com.mall.user.service.UserService;
@@ -38,20 +39,18 @@ public class UserServiceImpl implements UserService {
 	}
 
 	@Override
-	public Long save(User user) {
-		log.info("新增用户, username={}", user.getUsername());
-		// 注册入口：用户名和密码是必填，缺了直接 1000，不落库
-		if (user.getUsername() == null || user.getUsername().isBlank()
-				|| user.getPassword() == null || user.getPassword().isBlank()) {
-			throw new BizException(ErrorCode.PARAM_ERROR);
-		}
-		// 用户名唯一：查重放在加密之前，避免白算一次哈希
-		if (userMapper.selectByUsername(user.getUsername()) != null) {
-			log.warn("注册失败, 用户名已存在: {}", user.getUsername());
+	public Long save(RegisterDTO dto) {
+		log.info("新增用户, username={}", dto.getUsername());
+		// 必填与长度已由 RegisterDTO 上的注解校验，这里只保留业务规则：用户名唯一
+		if (userMapper.selectByUsername(dto.getUsername()) != null) {
+			log.warn("注册失败, 用户名已存在: {}", dto.getUsername());
 			throw new BizException(ErrorCode.USERNAME_EXISTS);
 		}
+		User user = new User();
+		user.setUsername(dto.getUsername());
+		user.setPhone(dto.getPhone());
 		// 明文 → BCrypt 哈希（同一个密码每次生成的哈希都不同，因为带随机盐）
-		user.setPassword(passwordEncoder.encode(user.getPassword()));
+		user.setPassword(passwordEncoder.encode(dto.getPassword()));
 		userMapper.insert(user);
 		// insert 执行完后自增主键已回填到 user.id，直接返回
 		return user.getId();

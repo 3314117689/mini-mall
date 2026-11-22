@@ -36,7 +36,7 @@ L10 不加业务功能，只做三件事：**在线文档、注解校验、异�
 | L10-1 | 接入 SpringDoc（依赖/分组/prod 开关），三个 Swagger UI 可打开 | ✅ |
 | L10-2 | Swagger 指向网关 + Bearer 鉴权，调通下单/分页 | ✅ |
 | L10-3 | `GlobalExceptionHandler` 接管 JSR303 / 绑定 / 类型转换异常 | ✅ |
-| L10-4 | 登录/注册 DTO 校验，删 `UserServiceImpl`/`AuthServiceImpl` 手写 if | ⬜ |
+| L10-4 | 登录/注册 DTO 校验，删 `UserServiceImpl`/`AuthServiceImpl` 手写 if | ✅ |
 | L10-5 | 商品与库存接口校验，`/product/stock/**` 文档隐藏 | ⬜ |
 | L10-6 | 下单/分页/游标参数校验，删 `checkPageArgs` 与 `MAX_PAGE_SIZE` | ⬜ |
 | L10-7 | 总验收、文档、提交推送 | ⬜ |
@@ -284,3 +284,83 @@ foreach ($p in 8081,8082,8083) { curl.exe -s -o NUL -w "%{http_code}" "http://lo
 
 - 撤销：`GlobalExceptionHandler` 恢复为 L9 版本（只留 `BizException`、`Exception`、`handleFavicon`）。
 - 影响：无数据变更；回滚后 JSR303 异常会落回 5000，prod 关闭文档后又变回 200 空体。
+
+## 八、L10-4 登录/注册参数校验
+
+**命令入场**
+
+```text
+POST http://localhost:8081/auth/register  {}
+POST http://localhost:8081/auth/register  {"username":"ab","password":"123456"}
+POST http://localhost:8081/auth/register  {"username":"l10tester","password":"123456","phone":"13800000000"}
+POST http://localhost:8081/auth/login     {}
+POST http://localhost:8081/auth/login     {"username":"zhangsan","password":"123456"}
+```
+
+**结局表**
+
+| 结局 | 触发条件 | 现象 |
+|---|---|---|
+| ① 必填缺失 | 注册/登录 body 为 `{}` | `code=1000`，message 两个字段都点出来 |
+| ② 格式不对 | 用户名 2 位、密码 3 位 | `code=1000`，指明长度区间 |
+| ③ 合法注册 | 用户名不重复 | `code=0`，`data` 为自增 id |
+| ④ 用户名重复 | 同一用户名再注册 | 仍走业务码 `1004` 用户名已存在（业务规则保留） |
+| ⑤ 登录成功 | 用户名密码正确 | `code=0`，返回 token |
+| ⑥ 登录失败 | 密码错误 | 仍是 `1005`，不会被校验注解改成 1000 |
+
+### 第 1 步｜注册 DTO
+
+新增 [RegisterDTO.java](file:///d:/bishe/workspace/gongju/eclipseworkspace/mini-mall/v1/mall-user/src/main/java/com/mall/user/dto/RegisterDTO.java)：
+
+| 字段 | 注解 | message |
+|---|---|---|
+| `username` | `@NotBlank` + `@Size(min=3,max=20)` | `不能为空` / `长度需在 3~20 个字符之间` |
+| `password` | `@NotBlank` + `@Size(min=6,max=32)` | `不能为空` / `长度需在 6~32 个字符之间` |
+| `phone` | `@Size(max=20)`（可选） | `长度不能超过 20 个字符` |
+
+- 【为什么 message 里不写"用户名"】`GlobalExceptionHandler.formatFieldError` 会拼成 `字段: 原因`，注解里再写字段名就重复成 `username: 用户名不能为空`。
+- 【为什么注册要单独 DTO】原来直接收 `User`，客户端可以顺手传 `id`/`role`；DTO 只放开 `username`/`password`/`phone`，多余字段被忽略。
+
+### 第 2 步｜登录 DTO
+
+[LoginDTO.java](file:///d:/bishe/workspace/gongju/eclipseworkspace/mini-mall/v1/mall-user/src/main/java/com/mall/user/dto/LoginDTO.java)：两个字段加 `@NotBlank`，只加 `@Size(max=...)` 上限。
+
+- 【为什么登录不校验密码最小长度】密码短了本来就会走到"用户名或密码错误"的 `1005`；如果校验成 `1000`，反而把"格式错误"和"账号密码错误"区分开，多给了攻击者一点信息。
+
+### 第 3 步｜Controller 加 `@Valid`
+
+- [UserController](file:///d:/bishe/workspace/gongju/eclipseworkspace/mini-mall/v1/mall-user/src/main/java/com/mall/user/controller/UserController.java)：`save(@Valid @RequestBody RegisterDTO dto)`。
+- [AuthController](file:///d:/bishe/workspace/gongju/eclipseworkspace/mini-mall/v1/mall-user/src/main/java/com/mall/user/controller/AuthController.java)：`login(@Valid @RequestBody LoginDTO dto)`、`register(@Valid @RequestBody RegisterDTO dto)`。
+- `update` 仍收 `User`：更新没有必填字段，先不动；要加约束时再拆 `UserUpdateDTO`。
+
+### 第 4 步｜Service 删手写校验
+
+- [UserService.save](file:///d:/bishe/workspace/gongju/eclipseworkspace/mini-mall/v1/mall-user/src/main/java/com/mall/user/service/UserService.java) 签名改为 `Long save(RegisterDTO dto)`。
+- [UserServiceImpl.save](file:///d:/bishe/workspace/gongju/eclipseworkspace/mini-mall/v1/mall-user/src/main/java/com/mall/user/service/impl/UserServiceImpl.java)：删掉 username/password 非空判断，保留"用户名唯一"业务规则；DTO 转 `User` 后再哈希落库（`UserMapper.insert` 不写 role，走库默认值 USER）。
+- [AuthServiceImpl.login](file:///d:/bishe/workspace/gongju/eclipseworkspace/mini-mall/v1/mall-user/src/main/java/com/mall/user/service/impl/AuthServiceImpl.java)：删掉 username/password 非空判断，直接查库。
+
+### 第 5 步｜验证
+
+直连 8081，`/auth/**` 不需要身份头：
+
+- 【数据】`[D9]`：
+
+| 请求 | 返回 |
+|---|---|
+| `POST /auth/register` body=`{}` | `{"code":1000,"msg":"password: 不能为空；username: 不能为空"}` |
+| `POST /auth/register` body=`{"username":"ab","password":"123456"}` | `{"code":1000,"msg":"username: 长度需在 3~20 个字符之间"}` |
+| `POST /auth/register` body=`{"username":"l10tester","password":"123456","phone":"13800000000"}` | `{"code":0,"data":9,"msg":"ok"}` |
+| 同一用户名再注册 | `{"code":1004,"msg":"用户名已存在"}` |
+| `POST /auth/login` body=`{}` | `{"code":1000,"msg":"username: 不能为空；password: 不能为空"}` |
+| `POST /auth/login` `zhangsan/123456` | `code=0`，token 正常签发 |
+| `POST /auth/login` `zhangsan/bad` | `{"code":1005,"msg":"用户名或密码错误"}` |
+| `POST /user`（带三个身份头）body=`{"username":"ab"}` | `{"code":1000,"msg":"password: 不能为空；username: 长度需在 3~20 个字符之间"}` |
+
+- 【数据】`GET /v3/api-docs/user-service` 已含 `RegisterDTO`，`username.minLength=3`，`/auth/register` 的 requestBody 指向它。
+- 【数据】测试用户 `l10tester`（id=9）保留在库里，用于后续验收；不清理。
+
+### L10-4 回滚方案
+
+- 撤销：删除 `RegisterDTO`；`LoginDTO` 去掉校验注解；两个 Controller 去掉 `@Valid` 并改回收 `User`；`UserService.save` 改回 `Long save(User user)`；恢复 `UserServiceImpl.save` 与 `AuthServiceImpl.login` 的两段 if。
+- 影响：无表结构、无 Redis 变更；回滚后注册仍可传 `id/role`，坏参数只返回不带字段名的 1000。
+

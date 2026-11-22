@@ -39,7 +39,7 @@ L10 不加业务功能，只做三件事：**在线文档、注解校验、异�
 | L10-4 | 登录/注册 DTO 校验，删 `UserServiceImpl`/`AuthServiceImpl` 手写 if | ✅ |
 | L10-5 | 商品与库存接口校验，`/product/stock/**` 文档隐藏 | ✅ |
 | L10-6 | 下单/分页/游标参数校验，删 `checkPageArgs` 与 `MAX_PAGE_SIZE` | ✅ |
-| L10-7 | 总验收、文档、提交推送 | ⬜ |
+| L10-7 | 总验收、文档、提交推送 | ✅ |
 
 ## 四、L10-0 基线体检
 
@@ -532,6 +532,82 @@ POST http://localhost:8083/order/create  {"productId":1,"num":1}
 
 - 撤销：`OrderCreateDTO` 去掉 4 个注解；Controller 去掉 `@Valid` 与所有参数约束、删除 `MAX_PAGE_SIZE`；`OrderServiceImpl` 恢复 `MAX_PAGE_SIZE` 常量、`create` 的三条件 if、`checkPageArgs` 方法及两处调用。
 - 影响：无表结构变更；回滚后非法参数仍返回 1000，但 message 不带字段名（回到 L9 行为）。
+
+## 十一、L10-7 总验收
+
+**验收口径**（对应 01 第 19 行的 L10 目标）：Swagger UI 可打开、带 token 经网关调通下单/分页、非法参数返回 1000 且 message 指明字段、生产关闭文档、原直连方式不受影响。
+
+### 第 1 步｜三服务文档可打开
+
+```powershell
+foreach ($p in 8081,8082,8083) { curl.exe -s -o NUL -w "%{http_code}" "http://localhost:$p/swagger-ui/index.html" }
+```
+
+- 【数据】`[D12]`：`8081 / 8082 / 8083` 的 `/swagger-ui/index.html` 全部 `200`。
+
+### 第 2 步｜`Result<T>` 泛型在文档里能看出来
+
+- 【数据】`[D13]`：
+
+| 文档 | schema | 结论 |
+|---|---|---|
+| user | `ResultUser` | `data` 指向 `User`，`password` 不出现（`WRITE_ONLY`） |
+| product | `ResultProduct` | `data` 指向 `Product` |
+| order | `ResultListOrder` | `data.type=array`，`items.$ref=#/components/schemas/Order` |
+
+### 第 3 步｜经网关带 token 调通
+
+先登录（口令 `zhangsan/123456`），再带 `Authorization: Bearer <token>` 调受保护接口；order/product 有限流 2/s，命令之间留 700ms。
+
+- 【数据】`[D14]`：
+
+| 请求 | 返回 |
+|---|---|
+| `POST http://localhost:9000/api/auth/login` | `code=0`，token 长度 `501` |
+| 同地址 body=`{}` | `{"code":1000,"msg":"username: 不能为空；password: 不能为空"}` |
+| `POST /api/order/create` 不带 token | `{"code":4010,"msg":"未登录，请先登录"}` |
+| `POST /api/order/create` 带 token `{"productId":1,"num":1}` | `{"code":0,"data":100159}`，orderNo=`ORD000000008010` |
+| `GET /api/order/page?userId=1&page=1&size=3` 带 token | `code=0`，3 条（id=100007/100006/100005） |
+| 同地址 `page=0` | `{"code":1000,"msg":"page: 不能小于 1"}` |
+
+### 第 4 步｜生产 profile 关闭文档
+
+```powershell
+java -jar target\mall-order-1.0.0.jar --server.port=8084 --spring.profiles.active=prod `
+  --spring.cloud.nacos.discovery.enabled=false
+```
+
+- 【数据】`[D15]`：日志 `The following 1 profile is active: "prod"`；`GET /v3/api-docs` → `404`、响应体 `0` 字节；`GET /swagger-ui/index.html` → `404`、`0` 字节。L10-1 的"200 空体"问题已被 L10-3 的 `NoResourceFoundException` 分支修正。
+
+### 第 5 步｜直连方式回归
+
+- 【数据】`[D16]`：
+
+| 请求 | 返回 |
+|---|---|
+| `GET 8081/user/1`（三个身份头） | `code=0`，`zhangsan` / `role=ADMIN` |
+| `GET 8082/product/1` | `code=0`，`测试商品`，库存 `97` |
+| `GET 8083/order/page?userId=1&page=1&size=3` | `code=0`，3 条 |
+
+- 结论：直连 8081/8082/8083 仍然只认 `X-Mall-*` 三个头，不要求 Bearer；本次改动只新增注解与文档，没有改变鉴权方式。
+
+### 第 6 步｜数据水位
+
+- 【数据】`[D17]`：
+
+| 项 | 值 | 说明 |
+|---|---|---|
+| 商品 1 库存 | `97` | L10-2 扣 1（100→99），L10-6 扣 1（99→98），L10-7 扣 1（98→97） |
+| 测试订单 | `100158`（`ORD000000008009`）、`100159`（`ORD000000008010`） | L10-6 / L10-7 各下一单，保留不清理 |
+| `id_segment.max_id` | `9008` | 号段预分配：当前内存段是 8009~9008，已发出 8010 之前的值 |
+| 测试商品 | id=`889`，`L10测试商品`，库存 `10` | L10-5 新增，保留 |
+| 测试用户 | id=`9`，`l10tester` | L10-4 注册，保留 |
+
+### L10-7 回滚方案
+
+- 本章没有新增表结构；如需整体回到 L9，依次回滚 L10-6 → L10-1：删注解与 `@Valid`、恢复 Service 手写校验、删三个 `OpenApiConfig` 与 `application-prod.yml`、去掉四个 pom 的 springdoc/validation 依赖。
+- 数据不随代码回滚：已下的两单与测试商品/用户保留，不影响后续楼层。
+
 
 
 

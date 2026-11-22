@@ -58,6 +58,11 @@ public class OrderServiceImpl implements OrderService {
 	@Autowired
 	private SegmentIdGenerator segmentIdGenerator;
 
+	/** L9-5：补偿池，CallerRunsPolicy，库存回补任务不能丢 */
+	@Autowired
+	@Qualifier(ThreadPoolConfig.COMPENSATE_EXECUTOR)
+	private ThreadPoolTaskExecutor compensateExecutor;
+
 	@Override
 	public Order getById(Long id) {
 		log.info("查询订单, id={}", id);
@@ -140,14 +145,27 @@ public class OrderServiceImpl implements OrderService {
 			throw new BizException(ErrorCode.SYSTEM_ERROR);
 		}
 
+		// L9-5：先扣库存再落订单；扣减失败直接返回（1006/2002/2003/4290）
+		Integer remaining = remoteService.deductStock(snapshot.product().getId(), dto.getNum());
+		log.info("库存扣减成功, productId={}, num={}, remaining={}",
+				snapshot.product().getId(), dto.getNum(), remaining);
+
 		Order order = new Order();
-		order.setOrderNo(segmentIdGenerator.nextOrderNo());
-		order.setUserId(snapshot.user().getId());
-		order.setProductId(snapshot.product().getId());
-		order.setNum(dto.getNum());
-		// 金额只在服务端计算，客户端伪造不了
-		order.setAmount(snapshot.product().getPrice().multiply(BigDecimal.valueOf(dto.getNum())));
-		orderMapper.insert(order);
+		try {
+			order.setOrderNo(segmentIdGenerator.nextOrderNo());
+			order.setUserId(snapshot.user().getId());
+			order.setProductId(snapshot.product().getId());
+			order.setNum(dto.getNum());
+			// 金额只在服务端计算，客户端伪造不了
+			order.setAmount(snapshot.product().getPrice().multiply(BigDecimal.valueOf(dto.getNum())));
+			orderMapper.insert(order);
+		} catch (RuntimeException e) {
+			// 库存已经扣了但订单没落成：必须回补，走补偿池，不能丢
+			log.error("订单落库失败，开始回补库存, productId={}, num={}",
+					snapshot.product().getId(), dto.getNum(), e);
+			compensateStock(snapshot.product().getId(), dto.getNum());
+			throw new BizException(ErrorCode.SYSTEM_ERROR);
+		}
 
 		log.info("下单成功, orderId={}, orderNo={}, amount={}",
 				order.getId(), order.getOrderNo(), order.getAmount());
@@ -191,6 +209,18 @@ public class OrderServiceImpl implements OrderService {
 		log.info("游标查询订单, userId={}, lastCreateTime={}, lastId={}, size={}",
 				userId, lastCreateTime, lastId, size);
 		return orderMapper.selectCursor(userId, lastCreateTime, lastId, size);
+	}
+
+	/** 补偿必须走独立池：在线池宁可拒绝，补偿池用 CallerRunsPolicy 保证执行 */
+	private void compensateStock(Long productId, Integer num) {
+		compensateExecutor.execute(() -> {
+			try {
+				remoteService.releaseStock(productId, num);
+				log.info("库存补偿成功, productId={}, num={}", productId, num);
+			} catch (Exception e) {
+				log.error("库存补偿失败，需要人工对账, productId={}, num={}", productId, num, e);
+			}
+		});
 	}
 
 	/** 分页参数统一校验，page 从 1 开始 */

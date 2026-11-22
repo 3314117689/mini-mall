@@ -92,4 +92,58 @@ public class RemoteService {
         log.warn("商品服务调用被 Sentinel 拦截, productId={}", productId);
         throw new BizException(ErrorCode.FLOW_LIMITED);
     }
+
+    /**
+     * L9-5：扣库存。商品服务返回 1006（库存不足）时要原样保留业务码，
+     * 不能像"调用不通"那样统一翻成 2003，否则前端分不清是没库存还是服务挂了。
+     */
+    @SentinelResource(value = "deductStock", fallback = "deductStockFallback", blockHandler = "deductStockBlocked")
+    public Integer deductStock(Long productId, Integer num) {
+        Result<Integer> result = productClient.deductStock(productId, num);
+        if (result == null) {
+            throw new BizException(ErrorCode.PRODUCT_SERVICE_UNAVAILABLE);
+        }
+        if (result.getCode() != 0) {
+            throw new BizException(result.getCode(), result.getMsg());
+        }
+        return result.getData();
+    }
+
+    public Integer deductStockFallback(Long productId, Integer num, Throwable t) {
+        if (t instanceof BizException) {
+            throw (BizException) t;
+        }
+        log.error("扣减库存降级, productId={}, num={}, 原因: {}", productId, num, t.getMessage());
+        throw new BizException(ErrorCode.PRODUCT_SERVICE_UNAVAILABLE);
+    }
+
+    public Integer deductStockBlocked(Long productId, Integer num, BlockException e) {
+        log.warn("扣减库存被 Sentinel 拦截, productId={}, num={}", productId, num);
+        throw new BizException(ErrorCode.FLOW_LIMITED);
+    }
+
+    /** L9-5：回补库存，语义同扣减 */
+    @SentinelResource(value = "releaseStock", fallback = "releaseStockFallback", blockHandler = "releaseStockBlocked")
+    public void releaseStock(Long productId, Integer num) {
+        Result<Void> result = productClient.releaseStock(productId, num);
+        if (result == null) {
+            throw new BizException(ErrorCode.PRODUCT_SERVICE_UNAVAILABLE);
+        }
+        if (result.getCode() != 0) {
+            throw new BizException(result.getCode(), result.getMsg());
+        }
+    }
+
+    public void releaseStockFallback(Long productId, Integer num, Throwable t) {
+        if (t instanceof BizException) {
+            throw (BizException) t;
+        }
+        log.error("回补库存降级, productId={}, num={}, 原因: {}", productId, num, t.getMessage());
+        throw new BizException(ErrorCode.PRODUCT_SERVICE_UNAVAILABLE);
+    }
+
+    public void releaseStockBlocked(Long productId, Integer num, BlockException e) {
+        log.warn("回补库存被 Sentinel 拦截, productId={}, num={}", productId, num);
+        throw new BizException(ErrorCode.FLOW_LIMITED);
+    }
 }

@@ -59,6 +59,9 @@ public enum ErrorCode {
     /** 下单远程调用超时（L9-2）：CompletableFuture.orTimeout 到点仍未等齐 */
     REMOTE_TIMEOUT(2004, "远程调用超时，请稍后重试"),
 
+    /** 库存扣减处理中（L9 修复）：上一次扣减还没收口，调用方稍后按订单号查询 */
+    DEDUCT_PROCESSING(2040, "库存扣减处理中，请稍后查询"),
+
     /** Sentinel 限流/熔断拦截（L4）：触发规则的请求由拦截处理器统一返回此文案 */
     FLOW_LIMITED(4290, "请求过于频繁，请稍后再试"),
 

@@ -11,6 +11,7 @@ import com.mall.common.exception.ErrorCode;
 import com.mall.common.result.Result;
 import com.mall.order.client.ProductClient;
 import com.mall.order.client.UserClient;
+import com.mall.order.dto.DeductStatusDTO;
 import com.mall.order.dto.ProductDTO;
 import com.mall.order.dto.UserDTO;
 
@@ -96,10 +97,11 @@ public class RemoteService {
     /**
      * L9-5：扣库存。商品服务返回 1006（库存不足）时要原样保留业务码，
      * 不能像"调用不通"那样统一翻成 2003，否则前端分不清是没库存还是服务挂了。
+     * L9 修复：orderNo 做幂等键，超时后可以用同一个 orderNo 重试或查状态。
      */
     @SentinelResource(value = "deductStock", fallback = "deductStockFallback", blockHandler = "deductStockBlocked")
-    public Integer deductStock(Long productId, Integer num) {
-        Result<Integer> result = productClient.deductStock(productId, num);
+    public Integer deductStock(String orderNo, Long productId, Integer num) {
+        Result<Integer> result = productClient.deductStock(orderNo, productId, num);
         if (result == null) {
             throw new BizException(ErrorCode.PRODUCT_SERVICE_UNAVAILABLE);
         }
@@ -109,23 +111,24 @@ public class RemoteService {
         return result.getData();
     }
 
-    public Integer deductStockFallback(Long productId, Integer num, Throwable t) {
+    public Integer deductStockFallback(String orderNo, Long productId, Integer num, Throwable t) {
         if (t instanceof BizException) {
             throw (BizException) t;
         }
-        log.error("扣减库存降级, productId={}, num={}, 原因: {}", productId, num, t.getMessage());
+        log.error("扣减库存降级, orderNo={}, productId={}, num={}, 原因: {}",
+                orderNo, productId, num, t.getMessage());
         throw new BizException(ErrorCode.PRODUCT_SERVICE_UNAVAILABLE);
     }
 
-    public Integer deductStockBlocked(Long productId, Integer num, BlockException e) {
-        log.warn("扣减库存被 Sentinel 拦截, productId={}, num={}", productId, num);
+    public Integer deductStockBlocked(String orderNo, Long productId, Integer num, BlockException e) {
+        log.warn("扣减库存被 Sentinel 拦截, orderNo={}, productId={}, num={}", orderNo, productId, num);
         throw new BizException(ErrorCode.FLOW_LIMITED);
     }
 
-    /** L9-5：回补库存，语义同扣减 */
+    /** L9-5：回补库存，语义同扣减；L9 修复后按 orderNo 幂等 */
     @SentinelResource(value = "releaseStock", fallback = "releaseStockFallback", blockHandler = "releaseStockBlocked")
-    public void releaseStock(Long productId, Integer num) {
-        Result<Void> result = productClient.releaseStock(productId, num);
+    public void releaseStock(String orderNo, Long productId, Integer num) {
+        Result<Void> result = productClient.releaseStock(orderNo, productId, num);
         if (result == null) {
             throw new BizException(ErrorCode.PRODUCT_SERVICE_UNAVAILABLE);
         }
@@ -134,16 +137,43 @@ public class RemoteService {
         }
     }
 
-    public void releaseStockFallback(Long productId, Integer num, Throwable t) {
+    public void releaseStockFallback(String orderNo, Long productId, Integer num, Throwable t) {
         if (t instanceof BizException) {
             throw (BizException) t;
         }
-        log.error("回补库存降级, productId={}, num={}, 原因: {}", productId, num, t.getMessage());
+        log.error("回补库存降级, orderNo={}, productId={}, num={}, 原因: {}",
+                orderNo, productId, num, t.getMessage());
         throw new BizException(ErrorCode.PRODUCT_SERVICE_UNAVAILABLE);
     }
 
-    public void releaseStockBlocked(Long productId, Integer num, BlockException e) {
-        log.warn("回补库存被 Sentinel 拦截, productId={}, num={}", productId, num);
+    public void releaseStockBlocked(String orderNo, Long productId, Integer num, BlockException e) {
+        log.warn("回补库存被 Sentinel 拦截, orderNo={}, productId={}, num={}", orderNo, productId, num);
+        throw new BizException(ErrorCode.FLOW_LIMITED);
+    }
+
+    /** L9 修复：超时后查扣减状态，语义同扣减（调用不通 → 2003） */
+    @SentinelResource(value = "deductStatus", fallback = "deductStatusFallback", blockHandler = "deductStatusBlocked")
+    public DeductStatusDTO deductStatus(String orderNo) {
+        Result<DeductStatusDTO> result = productClient.deductStatus(orderNo);
+        if (result == null) {
+            throw new BizException(ErrorCode.PRODUCT_SERVICE_UNAVAILABLE);
+        }
+        if (result.getCode() != 0) {
+            throw new BizException(result.getCode(), result.getMsg());
+        }
+        return result.getData();
+    }
+
+    public DeductStatusDTO deductStatusFallback(String orderNo, Throwable t) {
+        if (t instanceof BizException) {
+            throw (BizException) t;
+        }
+        log.error("查询扣减状态降级, orderNo={}, 原因: {}", orderNo, t.getMessage());
+        throw new BizException(ErrorCode.PRODUCT_SERVICE_UNAVAILABLE);
+    }
+
+    public DeductStatusDTO deductStatusBlocked(String orderNo, BlockException e) {
+        log.warn("查询扣减状态被 Sentinel 拦截, orderNo={}", orderNo);
         throw new BizException(ErrorCode.FLOW_LIMITED);
     }
 }

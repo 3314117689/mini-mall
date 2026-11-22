@@ -21,6 +21,7 @@ import com.mall.common.auth.UserContext;
 import com.mall.common.exception.BizException;
 import com.mall.common.exception.ErrorCode;
 import com.mall.order.config.ThreadPoolConfig;
+import com.mall.order.dto.DeductStatusDTO;
 import com.mall.order.dto.OrderCreateDTO;
 import com.mall.order.dto.ProductDTO;
 import com.mall.order.dto.UserDTO;
@@ -145,14 +146,21 @@ public class OrderServiceImpl implements OrderService {
 			throw new BizException(ErrorCode.SYSTEM_ERROR);
 		}
 
-		// L9-5：先扣库存再落订单；扣减失败直接返回（1006/2002/2003/4290）
-		Integer remaining = remoteService.deductStock(snapshot.product().getId(), dto.getNum());
-		log.info("库存扣减成功, productId={}, num={}, remaining={}",
-				snapshot.product().getId(), dto.getNum(), remaining);
+		// L9 修复：先取号，orderNo 同时作为库存扣减的幂等键
+		String orderNo = segmentIdGenerator.nextOrderNo();
+
+		Integer remaining;
+		try {
+			remaining = remoteService.deductStock(orderNo, snapshot.product().getId(), dto.getNum());
+			log.info("库存扣减成功, orderNo={}, productId={}, num={}, remaining={}",
+					orderNo, snapshot.product().getId(), dto.getNum(), remaining);
+		} catch (BizException e) {
+			remaining = resolveDeductAfterFailure(orderNo, e);
+		}
 
 		Order order = new Order();
 		try {
-			order.setOrderNo(segmentIdGenerator.nextOrderNo());
+			order.setOrderNo(orderNo);
 			order.setUserId(snapshot.user().getId());
 			order.setProductId(snapshot.product().getId());
 			order.setNum(dto.getNum());
@@ -161,9 +169,9 @@ public class OrderServiceImpl implements OrderService {
 			orderMapper.insert(order);
 		} catch (RuntimeException e) {
 			// 库存已经扣了但订单没落成：必须回补，走补偿池，不能丢
-			log.error("订单落库失败，开始回补库存, productId={}, num={}",
-					snapshot.product().getId(), dto.getNum(), e);
-			compensateStock(snapshot.product().getId(), dto.getNum());
+			log.error("订单落库失败，开始回补库存, orderNo={}, productId={}, num={}",
+					orderNo, snapshot.product().getId(), dto.getNum(), e);
+			compensateStock(orderNo, snapshot.product().getId(), dto.getNum());
 			throw new BizException(ErrorCode.SYSTEM_ERROR);
 		}
 
@@ -211,14 +219,56 @@ public class OrderServiceImpl implements OrderService {
 		return orderMapper.selectCursor(userId, lastCreateTime, lastId, size);
 	}
 
+	/**
+	 * 扣减超时/不通时，按 orderNo 查一次状态：
+	 * - 成功：product 实际已扣，继续落单；
+	 * - 明确不存在：安全失败，按原错误返回；
+	 * - 失败：按 product 记录的失败码返回；
+	 * - 处理中/状态也查不到：返回 2040，让调用方用订单号后续查询。
+	 */
+	private Integer resolveDeductAfterFailure(String orderNo, BizException e) {
+		int code = e.getCode();
+		if (code != ErrorCode.PRODUCT_SERVICE_UNAVAILABLE.getCode()
+				&& code != ErrorCode.REMOTE_TIMEOUT.getCode()) {
+			throw e;
+		}
+
+		DeductStatusDTO status;
+		try {
+			status = remoteService.deductStatus(orderNo);
+		} catch (BizException statusError) {
+			log.warn("扣减失败且状态查询失败, orderNo={}, 扣减码={}", orderNo, code, statusError);
+			throw new BizException(ErrorCode.DEDUCT_PROCESSING.getCode(),
+					ErrorCode.DEDUCT_PROCESSING.getMsg() + "，订单号：" + orderNo);
+		}
+
+		if (status == null || status.getStatus() == null || status.getStatus() == -1) {
+			throw e;
+		}
+		if (status.getStatus() == 2) {
+			log.warn("扣减超时但实际成功, orderNo={}, remaining={}", orderNo, status.getRemaining());
+			return status.getRemaining() == null ? 0 : status.getRemaining();
+		}
+		if (status.getStatus() == 3) {
+			int errorCode = status.getErrorCode() == null
+					? ErrorCode.SYSTEM_ERROR.getCode() : status.getErrorCode();
+			String errorMsg = status.getErrorMsg() == null
+					? ErrorCode.SYSTEM_ERROR.getMsg() : status.getErrorMsg();
+			throw new BizException(errorCode, errorMsg);
+		}
+		throw new BizException(ErrorCode.DEDUCT_PROCESSING.getCode(),
+				ErrorCode.DEDUCT_PROCESSING.getMsg() + "，订单号：" + orderNo);
+	}
+
 	/** 补偿必须走独立池：在线池宁可拒绝，补偿池用 CallerRunsPolicy 保证执行 */
-	private void compensateStock(Long productId, Integer num) {
+	private void compensateStock(String orderNo, Long productId, Integer num) {
 		compensateExecutor.execute(() -> {
 			try {
-				remoteService.releaseStock(productId, num);
-				log.info("库存补偿成功, productId={}, num={}", productId, num);
+				remoteService.releaseStock(orderNo, productId, num);
+				log.info("库存补偿成功, orderNo={}, productId={}, num={}", orderNo, productId, num);
 			} catch (Exception e) {
-				log.error("库存补偿失败，需要人工对账, productId={}, num={}", productId, num, e);
+				log.error("库存补偿失败，需要人工对账, orderNo={}, productId={}, num={}",
+						orderNo, productId, num, e);
 			}
 		});
 	}

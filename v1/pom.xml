@@ -19,6 +19,7 @@
     <module>mall-user</module>
     <module>mall-product</module>
     <module>mall-order</module>
+    <module>mall-gateway</module>
   </modules>
   <properties>
     <java.version>17</java.version>

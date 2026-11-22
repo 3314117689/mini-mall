@@ -1,0 +1,38 @@
+# 网关对外端口：前端所有请求只打这里（L7）
+server:
+  port: 9000
+
+spring:
+  application:
+    # 服务名：注册到 Nacos 的名字
+    name: gateway-service
+  cloud:
+    nacos:
+      discovery:
+        # 注册中心地址：Nacos 服务端 8848（3.x 的 8080 只是控制台）
+        server-addr: 127.0.0.1:8848
+    gateway:
+      server:
+        webflux:
+          # 路由三要素：id（路由名）、uri（转发目标）、predicates（什么请求走这条路由）
+          # lb://服务名：交给 LoadBalancer 从 Nacos 取实例地址，不写死 IP
+          # StripPrefix=1：去掉路径第一段 /api，再转发给下游
+          routes:
+            - id: user-service
+              uri: lb://user-service
+              predicates:
+                - Path=/api/auth/**,/api/user/**
+              filters:
+                - StripPrefix=1
+            - id: product-service
+              uri: lb://product-service
+              predicates:
+                - Path=/api/product/**
+              filters:
+                - StripPrefix=1
+            - id: order-service
+              uri: lb://order-service
+              predicates:
+                - Path=/api/order/**
+              filters:
+                - StripPrefix=1

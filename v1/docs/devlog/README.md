@@ -26,6 +26,7 @@
 | [06-L5-Redis缓存.md](06-L5-Redis缓存.md) | 启动期 vs 请求期、缓存四结局、空值缓存、删缓存 |
 | [07-L6-JWT登录鉴权.md](07-L6-JWT登录鉴权.md) | RSA 密钥与 JWKS、BCrypt、签发/验签、拦截器、ThreadLocal、RBAC |
 | [08-理解确认台账.md](08-理解确认台账.md) | 用户已确认理解的内容、卡点、确认时间 |
+| [09-L7-Gateway网关.md](09-L7-Gateway网关.md) | 路由三要素、lb:// 换实例、StripPrefix、网关验签与限流 |
 
 ## 写作规范（写本目录任何一章都必须遵守）
 

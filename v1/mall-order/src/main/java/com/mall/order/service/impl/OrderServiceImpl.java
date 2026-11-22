@@ -3,12 +3,20 @@ package com.mall.order.service.impl;
 import java.math.BigDecimal;
 import java.time.LocalDateTime;
 import java.util.List;
+import java.util.concurrent.ExecutionException;
+import java.util.concurrent.Future;
+import java.util.concurrent.RejectedExecutionException;
 
 import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.beans.factory.annotation.Qualifier;
+import org.springframework.scheduling.concurrent.ThreadPoolTaskExecutor;
 import org.springframework.stereotype.Service;
 
+import com.mall.common.auth.LoginUser;
+import com.mall.common.auth.UserContext;
 import com.mall.common.exception.BizException;
 import com.mall.common.exception.ErrorCode;
+import com.mall.order.config.ThreadPoolConfig;
 import com.mall.order.dto.OrderCreateDTO;
 import com.mall.order.dto.ProductDTO;
 import com.mall.order.dto.UserDTO;
@@ -32,6 +40,11 @@ public class OrderServiceImpl implements OrderService {
 	/** 远程调用收口：每个调用是 Sentinel 资源，降级/拦截翻译都在里面（L4） */
 	@Autowired
 	private RemoteService remoteService;
+
+	/** L9-1：在线请求线程池，有界队列 + AbortPolicy，队列满直接拒绝 */
+	@Autowired
+	@Qualifier(ThreadPoolConfig.REMOTE_EXECUTOR)
+	private ThreadPoolTaskExecutor remoteExecutor;
 
 	@Override
 	public Order getById(Long id) {
@@ -60,6 +73,9 @@ public class OrderServiceImpl implements OrderService {
 	 * 3. 调商品服务拿到价格；
 	 * 4. 服务端用 单价 × 数量 算金额，客户端传的金额一律不信任；
 	 * 5. 落库并返回订单 id。
+	 *
+	 * L9-1 改动：第 2、3 步整体提交到 remoteExecutor，慢下游不再一直占用 Tomcat 线程；
+	 * 队列满时由拒绝策略抛异常，这里翻译成 4291。并行编排在 L9-2 再做。
 	 */
 	@Override
 	public Long create(Long userId, OrderCreateDTO dto) {
@@ -68,15 +84,51 @@ public class OrderServiceImpl implements OrderService {
 		}
 		log.info("下单, userId={}, productId={}, num={}", userId, dto.getProductId(), dto.getNum());
 
-		UserDTO user = remoteService.getUser(userId);
-		ProductDTO product = remoteService.getProduct(dto.getProductId());
+		// FeignAuthInterceptor 从 UserContext 取身份头；换线程后 ThreadLocal 为空，
+		// 必须把当前请求的身份快照带进任务，任务结束再 clear（线程会被复用）。
+		LoginUser loginUser = UserContext.get();
+		Future<RemoteSnapshot> future;
+		try {
+			future = remoteExecutor.submit(() -> {
+				log.info("远程调用任务开始, thread={}, userId={}",
+						Thread.currentThread().getName(), userId);
+				UserContext.set(loginUser);
+				try {
+					UserDTO user = remoteService.getUser(userId);
+					ProductDTO product = remoteService.getProduct(dto.getProductId());
+					return new RemoteSnapshot(user, product);
+				} finally {
+					UserContext.clear();
+				}
+			});
+		} catch (RejectedExecutionException e) {
+			log.warn("线程池拒绝下单任务, userId={}, productId={}", userId, dto.getProductId());
+			throw new BizException(ErrorCode.POOL_BUSY);
+		}
+
+		RemoteSnapshot snapshot;
+		try {
+			snapshot = future.get();
+		} catch (InterruptedException e) {
+			// 恢复中断标记，交给上层线程池决定是否退出
+			Thread.currentThread().interrupt();
+			throw new BizException(ErrorCode.SYSTEM_ERROR);
+		} catch (ExecutionException e) {
+			Throwable cause = e.getCause();
+			// 业务失败（用户/商品不存在、Sentinel 降级文案）原样放行
+			if (cause instanceof BizException bizException) {
+				throw bizException;
+			}
+			log.error("下单远程调用失败, userId={}, productId={}", userId, dto.getProductId(), cause);
+			throw new BizException(ErrorCode.SYSTEM_ERROR);
+		}
 
 		Order order = new Order();
-		order.setUserId(user.getId());
-		order.setProductId(product.getId());
+		order.setUserId(snapshot.user().getId());
+		order.setProductId(snapshot.product().getId());
 		order.setNum(dto.getNum());
 		// 金额只在服务端计算，客户端伪造不了
-		order.setAmount(product.getPrice().multiply(BigDecimal.valueOf(dto.getNum())));
+		order.setAmount(snapshot.product().getPrice().multiply(BigDecimal.valueOf(dto.getNum())));
 		orderMapper.insert(order);
 
 		log.info("下单成功, orderId={}, amount={}", order.getId(), order.getAmount());
@@ -127,5 +179,9 @@ public class OrderServiceImpl implements OrderService {
 		if (userId == null || page < 1 || size < 1 || size > MAX_PAGE_SIZE) {
 			throw new BizException(ErrorCode.PARAM_ERROR);
 		}
+	}
+
+	/** 线程池任务里两次远程调用的返回值，用 record 一次带回主线程 */
+	private record RemoteSnapshot(UserDTO user, ProductDTO product) {
 	}
 }

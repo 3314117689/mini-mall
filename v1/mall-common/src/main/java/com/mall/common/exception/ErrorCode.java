@@ -56,6 +56,9 @@ public enum ErrorCode {
     /** Sentinel 限流/熔断拦截（L4）：触发规则的请求由拦截处理器统一返回此文案 */
     FLOW_LIMITED(4290, "请求过于频繁，请稍后再试"),
 
+    /** 下单线程池已满（L9-1）：有界队列 + AbortPolicy 的反压兜底 */
+    POOL_BUSY(4291, "系统繁忙，请稍后重试"),
+
     /** 未捕获的系统异常兜底 */
     SYSTEM_ERROR(5000, "系统繁忙，请稍后再试");
 

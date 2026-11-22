@@ -1,6 +1,7 @@
 package com.mall.product.controller;
 
 import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.web.bind.annotation.DeleteMapping;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PathVariable;
@@ -21,8 +22,18 @@ public class ProductController {
 	@Autowired
 	private ProductService productService;
 
+	/**
+	 * L9 测试开关：默认 0 不生效；验收时用启动参数
+	 * --mall.product.slow-ms=2000 打开，模拟慢下游，测完重启即恢复。
+	 */
+	@Value("${mall.product.slow-ms:0}")
+	private long slowMs;
+
 	@GetMapping("/{id}")
-	public Result<Product> getById(@PathVariable Long id) {
+	public Result<Product> getById(@PathVariable Long id) throws InterruptedException {
+		if (slowMs > 0) {
+			Thread.sleep(slowMs);
+		}
 		return Result.ok(productService.getById(id));
 	}
 

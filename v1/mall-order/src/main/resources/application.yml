@@ -40,3 +40,17 @@ mybatis:
     map-underscore-to-camel-case: true
     # 开发期把 SQL 打到控制台，方便看 MyBatis 到底执行了什么
     log-impl: org.apache.ibatis.logging.stdout.StdOutImpl
+
+# L9-1：线程池参数。验收反压时可临时把 remote 的 queue 调成 1，测完改回。
+# 在线池宁可拒绝（4291），补偿池用 CallerRunsPolicy 不丢任务。
+mall:
+  order:
+    pool:
+      remote:
+        core: 8
+        max: 16
+        queue: 64
+      compensate:
+        core: 1
+        max: 2
+        queue: 32
